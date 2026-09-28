@@ -4,8 +4,9 @@ import unittest
 from pathlib import Path
 
 from xmpp_transport.domain.identifiers import BackendId
-from xmpp_transport.runtime.config import load_config
-from xmpp_transport.runtime.lifecycle import TaskSupervisor
+from xmpp_transport.runtime.config import DatabaseConfig, HttpConfig, RuntimeConfig, load_config
+from xmpp_transport.runtime.health import HealthState, RuntimeStatus
+from xmpp_transport.runtime.lifecycle import ApplicationRuntime, RuntimeShutdownError, TaskSupervisor
 from xmpp_transport.runtime.registry import BackendRegistry
 
 
@@ -32,6 +33,60 @@ class ConfigTests(unittest.TestCase):
             config = load_config(path)
         self.assertEqual(["telegram", "max"], [item.name for item in config.backends])
 
+    def test_reads_database_and_security_without_exposing_dsn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "transport.ini"
+            path.write_text(
+                "[backend:telegram]\ncomponent_domain=telegram.example.com\n"
+                "[database]\ndsn=postgresql://user:secret@db/transport\n"
+                "min_pool_size=2\nmax_pool_size=8\ncommand_timeout=12.5\n"
+                "[security]\ncredential_key_env=TEST_CREDENTIAL_KEY\n",
+                encoding="utf-8",
+            )
+            config = load_config(path)
+        self.assertIsNotNone(config.database)
+        assert config.database is not None
+        self.assertEqual(2, config.database.min_pool_size)
+        self.assertEqual("TEST_CREDENTIAL_KEY", config.credential_key_env)
+        self.assertNotIn("secret", repr(config))
+
+    def test_credential_key_is_loaded_from_named_environment_variable(self) -> None:
+        config = RuntimeConfig((), credential_key_env="CUSTOM_KEY")
+        self.assertEqual(b"safe-key", config.credential_key({"CUSTOM_KEY": "safe-key"}))
+
+    def test_missing_credential_key_is_reported_without_value(self) -> None:
+        config = RuntimeConfig((), credential_key_env="CUSTOM_KEY")
+        with self.assertRaises(ValueError) as context:
+            config.credential_key({})
+        self.assertIn("CUSTOM_KEY", str(context.exception))
+
+    def test_non_ascii_credential_key_is_rejected_without_disclosure(self) -> None:
+        config = RuntimeConfig((), credential_key_env="CUSTOM_KEY")
+        secret = "секрет"
+        with self.assertRaises(ValueError) as context:
+            config.credential_key({"CUSTOM_KEY": secret})
+        self.assertNotIn(secret, str(context.exception))
+        self.assertIsNone(context.exception.__cause__)
+
+    def test_database_pool_sizes_are_validated(self) -> None:
+        with self.assertRaises(ValueError):
+            DatabaseConfig("postgresql://db/transport", min_pool_size=3, max_pool_size=2)
+
+    def test_reads_http_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "transport.ini"
+            path.write_text(
+                "[backend:fake]\ncomponent_domain=fake.example.com\n"
+                "[http]\nhost=0.0.0.0\nport=9090\n",
+                encoding="utf-8",
+            )
+            config = load_config(path)
+        self.assertEqual(HttpConfig("0.0.0.0", 9090), config.http)
+
+    def test_http_port_is_validated(self) -> None:
+        with self.assertRaises(ValueError):
+            HttpConfig(port=0)
+
 
 class SupervisorTests(unittest.IsolatedAsyncioTestCase):
     async def test_close_cancels_owned_tasks(self) -> None:
@@ -50,6 +105,70 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cancelled.is_set())
 
 
+class OrderedResource:
+    def __init__(self, name: str, calls: list, fail_close: bool = False) -> None:
+        self.name = name
+        self.calls = calls
+        self.fail_close = fail_close
+
+    async def start(self) -> object:
+        self.calls.append("start:" + self.name)
+        return self
+
+    async def restore(self) -> None:
+        self.calls.append("restore:" + self.name)
+
+    async def close(self) -> None:
+        self.calls.append("close:" + self.name)
+        if self.fail_close:
+            raise RuntimeError("private failure")
+
+
+class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_and_close_order_and_health_transitions(self) -> None:
+        calls = []
+        health = HealthState()
+        server = OrderedResource("health", calls)
+        database = OrderedResource("database", calls)
+        sessions = OrderedResource("sessions", calls)
+        events = OrderedResource("events", calls)
+        runtime = ApplicationRuntime(health, server, database, sessions, events)
+
+        self.assertEqual(RuntimeStatus.STARTING, health.snapshot().status)
+        await runtime.start()
+        self.assertTrue(health.snapshot().ready)
+        await runtime.close()
+        self.assertEqual(RuntimeStatus.STOPPING, health.snapshot().status)
+        self.assertEqual(
+            [
+                "start:health",
+                "start:database",
+                "restore:sessions",
+                "close:sessions",
+                "close:events",
+                "close:database",
+                "close:health",
+            ],
+            calls,
+        )
+
+    async def test_close_continues_after_resource_failure(self) -> None:
+        calls = []
+        health = HealthState()
+        runtime = ApplicationRuntime(
+            health,
+            OrderedResource("health", calls),
+            OrderedResource("database", calls),
+            OrderedResource("sessions", calls, fail_close=True),
+            OrderedResource("events", calls),
+        )
+        await runtime.start()
+        with self.assertRaises(RuntimeShutdownError) as context:
+            await runtime.close()
+        self.assertIn("close:health", calls)
+        self.assertEqual("RuntimeError", context.exception.failures[0].exception_type)
+        self.assertNotIn("private failure", str(context.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
-

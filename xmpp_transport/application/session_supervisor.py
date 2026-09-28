@@ -1,0 +1,185 @@
+"""Own backend-session lifecycle without depending on concrete providers."""
+
+import asyncio
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+
+from xmpp_transport.domain.errors import AuthorizationRequired, TransportError
+from xmpp_transport.domain.identifiers import BackendId, BindingId
+from xmpp_transport.ports.backend import BackendSession
+from xmpp_transport.ports.events import BackendEventSink
+from xmpp_transport.ports.repositories import BindingRecord, BindingRepository, CredentialCipher
+from xmpp_transport.runtime.registry import BackendRegistry
+
+
+@dataclass(frozen=True)
+class LifecycleFailure:
+    binding_id: BindingId
+    operation: str
+    exception_type: str
+
+
+class SessionLifecycleError(TransportError):
+    def __init__(self, failures: Tuple[LifecycleFailure, ...]) -> None:
+        self.failures = failures
+        super().__init__("{} session lifecycle operation(s) failed".format(len(failures)))
+
+
+@dataclass
+class _ManagedSession:
+    backend_id: BackendId
+    session: BackendSession
+
+
+class SessionSupervisor:
+    """Starts each binding at most once and owns every created session."""
+
+    def __init__(
+        self,
+        registry: BackendRegistry,
+        bindings: BindingRepository,
+        credential_cipher: CredentialCipher,
+        event_sink: BackendEventSink,
+    ) -> None:
+        self._registry = registry
+        self._bindings = bindings
+        self._credential_cipher = credential_cipher
+        self._event_sink = event_sink
+        self._sessions: Dict[BindingId, _ManagedSession] = {}
+        self._binding_locks: Dict[BindingId, asyncio.Lock] = {}
+        self._state_lock = asyncio.Lock()
+        self._closed = False
+
+    async def start(self, binding_id: BindingId, backend_id: BackendId) -> BackendSession:
+        lock = await self._lock_for(binding_id)
+        async with lock:
+            async with self._state_lock:
+                if self._closed:
+                    raise RuntimeError("session supervisor is closed")
+                current = self._sessions.get(binding_id)
+                if current is not None:
+                    if current.backend_id != backend_id:
+                        raise ValueError(
+                            "binding {} is already owned by backend {}".format(
+                                binding_id, current.backend_id
+                            )
+                        )
+                    return current.session
+
+            encrypted = await self._bindings.encrypted_credentials(binding_id)
+            if encrypted is None:
+                raise AuthorizationRequired(
+                    "binding {} has no stored credentials".format(binding_id)
+                )
+            credentials = self._credential_cipher.decrypt(encrypted)
+            plugin = self._registry.get(backend_id)
+            session = plugin.create_session(binding_id, credentials, self._event_sink)
+
+            try:
+                await session.start()
+            except Exception as exc:
+                await self._close_after_failed_start(session)
+                raise SessionLifecycleError(
+                    (LifecycleFailure(binding_id, "start", type(exc).__name__),)
+                ) from exc
+
+            async with self._state_lock:
+                # close() cannot pass this binding's lock while start() is active.
+                if self._closed:
+                    await session.close()
+                    raise RuntimeError("session supervisor is closed")
+                self._sessions[binding_id] = _ManagedSession(backend_id, session)
+            return session
+
+    async def stop(self, binding_id: BindingId) -> None:
+        lock = await self._lock_for(binding_id)
+        async with lock:
+            async with self._state_lock:
+                managed = self._sessions.pop(binding_id, None)
+            if managed is None:
+                return
+            try:
+                await managed.session.close()
+            except Exception as exc:
+                raise SessionLifecycleError(
+                    (LifecycleFailure(binding_id, "stop", type(exc).__name__),)
+                ) from exc
+
+    async def restore(self) -> None:
+        """Start all persisted active bindings and report failures as metadata."""
+        records = await self._bindings.active_bindings()
+        results = await asyncio.gather(
+            *(self.start(record.binding_id, record.backend_id) for record in records),
+            return_exceptions=True,
+        )
+        failures: List[LifecycleFailure] = []
+        for record, result in zip(records, results):
+            if isinstance(result, BaseException):
+                if isinstance(result, SessionLifecycleError):
+                    failures.extend(result.failures)
+                else:
+                    failures.append(
+                        LifecycleFailure(
+                            record.binding_id,
+                            "restore",
+                            type(result).__name__,
+                        )
+                    )
+        if failures:
+            raise SessionLifecycleError(tuple(failures))
+
+    async def close(self) -> None:
+        async with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            binding_ids = tuple(self._sessions)
+
+        results = await asyncio.gather(
+            *(self._stop_during_close(binding_id) for binding_id in binding_ids),
+            return_exceptions=True,
+        )
+        failures = tuple(
+            failure
+            for result in results
+            if isinstance(result, SessionLifecycleError)
+            for failure in result.failures
+        )
+        if failures:
+            raise SessionLifecycleError(failures)
+
+    async def __aenter__(self) -> "SessionSupervisor":
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        await self.close()
+
+    async def _lock_for(self, binding_id: BindingId) -> asyncio.Lock:
+        async with self._state_lock:
+            lock = self._binding_locks.get(binding_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._binding_locks[binding_id] = lock
+            return lock
+
+    async def _stop_during_close(self, binding_id: BindingId) -> None:
+        lock = await self._lock_for(binding_id)
+        async with lock:
+            async with self._state_lock:
+                managed = self._sessions.pop(binding_id, None)
+            if managed is None:
+                return
+            try:
+                await managed.session.close()
+            except Exception as exc:
+                raise SessionLifecycleError(
+                    (LifecycleFailure(binding_id, "close", type(exc).__name__),)
+                ) from exc
+
+    @staticmethod
+    async def _close_after_failed_start(session: BackendSession) -> None:
+        try:
+            await session.close()
+        except Exception:
+            # The start failure is primary; both errors must avoid secret-bearing text.
+            pass

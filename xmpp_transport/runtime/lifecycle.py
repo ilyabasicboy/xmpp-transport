@@ -1,7 +1,10 @@
 """Python 3.9-compatible ownership and shutdown for background tasks."""
 
 import asyncio
-from typing import Awaitable, List, Optional
+from dataclasses import dataclass
+from typing import Awaitable, List, Optional, Protocol, Tuple
+
+from .health import HealthState
 
 
 class TaskSupervisor:
@@ -30,3 +33,96 @@ class TaskSupervisor:
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
         await self.close()
 
+
+class StartableResource(Protocol):
+    async def start(self) -> object:
+        ...
+
+    async def close(self) -> None:
+        ...
+
+
+class RestorableResource(Protocol):
+    async def restore(self) -> None:
+        ...
+
+    async def close(self) -> None:
+        ...
+
+
+class ClosableResource(Protocol):
+    async def close(self) -> None:
+        ...
+
+
+@dataclass(frozen=True)
+class ShutdownFailure:
+    resource: str
+    exception_type: str
+
+
+class RuntimeShutdownError(Exception):
+    def __init__(self, failures: Tuple[ShutdownFailure, ...]) -> None:
+        self.failures = failures
+        super().__init__("{} runtime resource(s) failed to close".format(len(failures)))
+
+
+class ApplicationRuntime:
+    """Starts dependencies in order and always tears them down in reverse order."""
+
+    def __init__(
+        self,
+        health: HealthState,
+        health_server: StartableResource,
+        database: StartableResource,
+        sessions: RestorableResource,
+        event_bus: ClosableResource,
+    ) -> None:
+        self._health = health
+        self._health_server = health_server
+        self._database = database
+        self._sessions = sessions
+        self._event_bus = event_bus
+        self._started = False
+        self._closed = False
+
+    async def start(self) -> None:
+        if self._closed:
+            raise RuntimeError("application runtime is closed")
+        if self._started:
+            return
+        self._started = True
+        try:
+            await self._health_server.start()
+            await self._database.start()
+            await self._sessions.restore()
+        except BaseException:
+            self._health.mark_failed()
+            raise
+        self._health.mark_ready()
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._health.mark_stopping()
+        failures = []
+        for name, resource in (
+            ("sessions", self._sessions),
+            ("event_bus", self._event_bus),
+            ("database", self._database),
+            ("health_server", self._health_server),
+        ):
+            try:
+                await resource.close()
+            except Exception as exc:
+                failures.append(ShutdownFailure(name, type(exc).__name__))
+        if failures:
+            raise RuntimeShutdownError(tuple(failures))
+
+    async def __aenter__(self) -> "ApplicationRuntime":
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        await self.close()

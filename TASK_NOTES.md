@@ -23,7 +23,7 @@ classes or preserve provider-specific coupling in the new core.
 
 - Unified transport framework:
   `/home/ilya.basyrov/Projects/xmpp-transport`
-- Unified server module (planned):
+- Unified server module (project directory created; implementation starts in Phase 6):
   `/home/ilya.basyrov/Projects/module-transport`
 
 ### Transport references

@@ -1,15 +1,34 @@
-from typing import Optional, Protocol
+from dataclasses import dataclass
+from typing import Optional, Protocol, Sequence
 
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
 
 
+@dataclass(frozen=True)
+class BindingRecord:
+    binding_id: BindingId
+    backend_id: BackendId
+
+
 class BindingRepository(Protocol):
+    async def active_bindings(self) -> Sequence[BindingRecord]:
+        ...
+
     async def encrypted_credentials(self, binding_id: BindingId) -> Optional[bytes]:
         ...
 
     async def save_encrypted_credentials(
         self, binding_id: BindingId, backend_id: BackendId, credentials: bytes
     ) -> None:
+        ...
+
+
+class CredentialCipher(Protocol):
+    def decrypt(self, encrypted: bytes) -> bytes:
+        """Decrypt an opaque credential payload without logging either value."""
+        ...
+
+    def encrypt(self, plaintext: bytes) -> bytes:
         ...
 
 
@@ -26,4 +45,3 @@ class MessageMappingRepository(Protocol):
         remote_message_id: RemoteObjectId,
     ) -> None:
         ...
-

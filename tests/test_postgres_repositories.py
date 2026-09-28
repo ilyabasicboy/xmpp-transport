@@ -1,0 +1,101 @@
+import unittest
+from typing import Any, List, Optional, Sequence, Tuple
+
+from xmpp_transport.adapters.postgres.migrations import packaged_migrations
+from xmpp_transport.adapters.postgres.repositories import (
+    AsyncpgBindingRepository,
+    AsyncpgMessageMappingRepository,
+)
+from xmpp_transport.domain.errors import DuplicateOperation
+from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
+
+
+class FakePool:
+    def __init__(self) -> None:
+        self.rows: Sequence[Any] = ()
+        self.value: Optional[Any] = None
+        self.status = "UPDATE 1"
+        self.calls: List[Tuple[str, Tuple[object, ...]]] = []
+
+    async def fetch(self, query: str, *args: object) -> Sequence[Any]:
+        self.calls.append((query, args))
+        return self.rows
+
+    async def fetchrow(self, query: str, *args: object) -> Optional[Any]:
+        self.calls.append((query, args))
+        return None
+
+    async def fetchval(self, query: str, *args: object) -> Optional[Any]:
+        self.calls.append((query, args))
+        return self.value
+
+    async def execute(self, query: str, *args: object) -> str:
+        self.calls.append((query, args))
+        return self.status
+
+
+class BindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_active_bindings_are_mapped_to_strong_ids(self) -> None:
+        pool = FakePool()
+        pool.rows = [{"binding_id": "binding-1", "backend_id": "telegram"}]
+        repository = AsyncpgBindingRepository(pool)
+        records = await repository.active_bindings()
+        self.assertEqual(BindingId("binding-1"), records[0].binding_id)
+        self.assertEqual(BackendId("telegram"), records[0].backend_id)
+
+    async def test_credentials_are_copied_from_database_buffer(self) -> None:
+        pool = FakePool()
+        pool.value = bytearray(b"encrypted")
+        repository = AsyncpgBindingRepository(pool)
+        value = await repository.encrypted_credentials(BindingId("binding-1"))
+        self.assertEqual(b"encrypted", value)
+        self.assertIsInstance(value, bytes)
+
+    async def test_credential_update_requires_existing_binding_and_backend(self) -> None:
+        pool = FakePool()
+        pool.status = "UPDATE 0"
+        repository = AsyncpgBindingRepository(pool)
+        with self.assertRaises(LookupError):
+            await repository.save_encrypted_credentials(
+                BindingId("missing"), BackendId("telegram"), b"encrypted"
+            )
+
+
+class MessageMappingRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_save_mapping_is_idempotent_for_same_remote_id(self) -> None:
+        pool = FakePool()
+        pool.value = "remote-1"
+        repository = AsyncpgMessageMappingRepository(pool)
+        await repository.save_mapping(
+            BindingId("binding-1"), "client-1", RemoteObjectId("remote-1")
+        )
+
+    async def test_save_mapping_rejects_conflicting_remote_id(self) -> None:
+        pool = FakePool()
+        pool.value = "remote-existing"
+        repository = AsyncpgMessageMappingRepository(pool)
+        with self.assertRaises(DuplicateOperation):
+            await repository.save_mapping(
+                BindingId("binding-1"), "client-1", RemoteObjectId("remote-new")
+            )
+
+    async def test_lookup_returns_opaque_remote_id(self) -> None:
+        pool = FakePool()
+        pool.value = "not-a-number"
+        repository = AsyncpgMessageMappingRepository(pool)
+        result = await repository.remote_id_for_client_message(
+            BindingId("binding-1"), "client-1"
+        )
+        self.assertEqual(RemoteObjectId("not-a-number"), result)
+
+
+class MigrationTests(unittest.TestCase):
+    def test_initial_migration_is_packaged(self) -> None:
+        migrations = packaged_migrations()
+        self.assertEqual([1], [migration.version for migration in migrations])
+        self.assertIn("CREATE TABLE backend_bindings", migrations[0].sql)
+        self.assertIn("CREATE TABLE message_mappings", migrations[0].sql)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -7,7 +7,11 @@ name = "xabber-xmpp-transport"
 version = "0.1.0"
 description = "Provider-neutral XMPP transport framework"
 requires-python = ">=3.9"
-dependencies = []
+dependencies = [
+  "aiohttp>=3.8,<4",
+  "asyncpg>=0.27,<1",
+  "cryptography>=41,<47",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -21,6 +25,9 @@ xabber-transport = "xmpp_transport.runtime.app:main"
 
 [tool.setuptools.packages.find]
 include = ["xmpp_transport*"]
+
+[tool.setuptools.package-data]
+"xmpp_transport.adapters.postgres" = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -37,4 +44,3 @@ select = ["E", "F", "I", "UP"]
 python_version = "3.9"
 strict = true
 packages = ["xmpp_transport"]
-

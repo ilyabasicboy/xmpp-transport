@@ -7,3 +7,7 @@ class BackendEventSink(Protocol):
     async def publish(self, event: BackendEvent) -> None:
         """Publish an event without exposing the underlying queue or broker."""
 
+
+class BackendEventHandler(Protocol):
+    async def handle(self, event: BackendEvent) -> None:
+        """Handle one event idempotently."""
