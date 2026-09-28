@@ -12,6 +12,7 @@ class BackendConfig:
     name: str
     component_domain: str
     options: Mapping[str, str]
+    component_secret: Optional[str] = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -74,10 +75,11 @@ class RuntimeConfig:
     http: HttpConfig = HttpConfig()
     credential_key_env: str = "XABBER_TRANSPORT_CREDENTIAL_KEY"
     environment_file: Optional[Path] = None
+    credential_key_value: Optional[str] = field(default=None, repr=False)
 
     def credential_key(self, environment: Optional[Mapping[str, str]] = None) -> bytes:
         source = os.environ if environment is None else environment
-        value = source.get(self.credential_key_env)
+        value = self.credential_key_value or source.get(self.credential_key_env)
         if value is None or not value.strip():
             raise ValueError(
                 "credential encryption key environment variable is not set: {}".format(
@@ -112,7 +114,15 @@ def load_config(path: Path) -> RuntimeConfig:
         domain = _required(parser.get(section, "component_domain", fallback=None), section)
         options = dict(parser.items(section))
         options.pop("component_domain", None)
-        backends.append(BackendConfig(name=name, component_domain=domain, options=options))
+        component_secret = options.pop("component_secret", None)
+        backends.append(
+            BackendConfig(
+                name=name,
+                component_domain=domain,
+                options=options,
+                component_secret=component_secret,
+            )
+        )
 
     if not backends:
         raise ValueError("configuration must contain at least one [backend:<name>] section")
@@ -124,6 +134,7 @@ def load_config(path: Path) -> RuntimeConfig:
     ).strip()
     if not key_environment:
         raise ValueError("security.credential_key_env must not be empty")
+    key_value = parser.get("security", "credential_key", fallback="").strip() or None
     return RuntimeConfig(
         backends=tuple(backends),
         database=database,
@@ -133,6 +144,7 @@ def load_config(path: Path) -> RuntimeConfig:
         ),
         credential_key_env=key_environment,
         environment_file=_environment_file(parser, path),
+        credential_key_value=key_value,
     )
 
 

@@ -50,6 +50,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual("TEST_CREDENTIAL_KEY", config.credential_key_env)
         self.assertNotIn("secret", repr(config))
 
+    def test_reads_inline_secrets_without_exposing_them_in_repr(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "transport.ini"
+            path.write_text(
+                "[backend:max]\ncomponent_domain=max.example.com\n"
+                "component_secret=private-component-secret\n"
+                "[database]\ndsn=postgresql://user:private@db/transport\n"
+                "[security]\ncredential_key=private-fernet-key\n",
+                encoding="utf-8",
+            )
+            config = load_config(path)
+
+        self.assertEqual("private-component-secret", config.backends[0].component_secret)
+        self.assertEqual(b"private-fernet-key", config.credential_key({}))
+        representation = repr(config)
+        self.assertNotIn("private-component-secret", representation)
+        self.assertNotIn("private-fernet-key", representation)
+        self.assertNotIn("postgresql://user:private", representation)
+
     def test_credential_key_is_loaded_from_named_environment_variable(self) -> None:
         config = RuntimeConfig((), credential_key_env="CUSTOM_KEY")
         self.assertEqual(b"safe-key", config.credential_key({"CUSTOM_KEY": "safe-key"}))

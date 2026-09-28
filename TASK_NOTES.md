@@ -301,9 +301,9 @@ The backend owns provider-specific transitions and returns typed challenges.
 The shared application layer owns presentation, expiry, notifications, and
 secure credential persistence.
 
-Passwords and other secrets must be submitted through short-lived HTTPS forms,
-not retained in XMPP message history. Public URLs must use opaque, expiring
-tokens and must not embed credentials, session data, or private media URLs.
+For compatibility with the existing transports, MAX two-factor passwords are
+submitted through the XMPP control chat. The transport must never log command
+bodies or authentication secrets.
 
 ## Persistence
 

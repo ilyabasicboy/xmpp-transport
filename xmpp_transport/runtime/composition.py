@@ -12,7 +12,7 @@ from xmpp_transport.adapters.postgres import (
     PostgresPoolManager,
 )
 from xmpp_transport.adapters.security import FernetCredentialCipher
-from xmpp_transport.adapters.web import AiohttpAuthenticationApi, AiohttpHealthServer
+from xmpp_transport.adapters.web import AiohttpHealthServer
 from xmpp_transport.adapters.xmpp import (
     ComponentSettings,
     ContactAddressCodec,
@@ -93,7 +93,6 @@ class SingleBackendRuntime:
         self._roster = roster
         self._application: Optional[ApplicationRuntime] = None
         self._authentication: Optional[AuthenticationCoordinator] = None
-        self._authentication_http: Optional[AiohttpAuthenticationApi] = None
         self._closed = False
 
     @property
@@ -106,12 +105,6 @@ class SingleBackendRuntime:
             raise RuntimeError("runtime authentication is not initialized")
         return self._authentication
 
-    @property
-    def authentication_http(self) -> AiohttpAuthenticationApi:
-        if self._authentication_http is None:
-            raise RuntimeError("runtime authentication HTTP API is not initialized")
-        return self._authentication_http
-
     async def start(self) -> None:
         if self._closed:
             raise RuntimeError("single backend runtime is closed")
@@ -119,10 +112,9 @@ class SingleBackendRuntime:
             return
         try:
             pool = await self._database.start()
-            application, authentication, authentication_http = self._build_application(pool)
+            application, authentication = self._build_application(pool)
             self._application = application
             self._authentication = authentication
-            self._authentication_http = authentication_http
             await application.start()
         except BaseException:
             self._health.mark_failed()
@@ -135,7 +127,6 @@ class SingleBackendRuntime:
         application = self._application
         self._application = None
         self._authentication = None
-        self._authentication_http = None
         if application is not None:
             await application.close()
             return
@@ -175,19 +166,11 @@ class SingleBackendRuntime:
             self._cipher,
             sessions,
         )
-        authentication_http = AiohttpAuthenticationApi(authentication)
-        self._health_server.add_routes(authentication_http.register)
-        auth_public_base_url = self._backend.options.get("auth_public_base_url", "")
-        control = (
-            XmppAuthenticationCommands(
-                self._plugin.backend_id,
-                self._backend.component_domain,
-                auth_public_base_url,
-                bindings,
-                authentication_http,
-            )
-            if auth_public_base_url
-            else None
+        control = XmppAuthenticationCommands(
+            self._plugin.backend_id,
+            self._backend.component_domain,
+            bindings,
+            authentication,
         )
         gateway = XmppDirectMessageGateway(
             self._wire,
@@ -205,9 +188,9 @@ class SingleBackendRuntime:
             sessions,
             event_bus,
             gateways=(gateway,),
-            managed_resources=(authentication, authentication_http),
+            managed_resources=(authentication,),
         )
-        return application, authentication, authentication_http
+        return application, authentication
 
     @staticmethod
     def _authorization_lost_handler(sessions: SessionSupervisor):  # type: ignore[no-untyped-def]
@@ -246,7 +229,7 @@ def compose_single_backend(
         "XABBER_TRANSPORT_{}_COMPONENT_SECRET".format(backend.name.upper().replace("-", "_")),
     )
     source = environment if environment is not None else os.environ
-    component_secret = source.get(secret_environment)
+    component_secret = backend.component_secret or source.get(secret_environment)
     if not component_secret:
         raise ValueError(
             "XMPP component secret environment variable is not set: {}".format(

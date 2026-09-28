@@ -53,6 +53,7 @@ def selected_config(
             http=config.http,
             credential_key_env=config.credential_key_env,
             environment_file=config.environment_file,
+            credential_key_value=config.credential_key_value,
         )
     if len(config.backends) != 1:
         raise ValueError("select one backend with --backend")
