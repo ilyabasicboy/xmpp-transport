@@ -34,6 +34,11 @@ class FakeAuthenticationFlow:
     async def close(self) -> None:
         self._closed = True
 
+    def credentials(self) -> bytes:
+        if self._closed:
+            raise RuntimeError("authentication flow is closed")
+        return b"fake"
+
 
 class FakeBackendSession:
     def __init__(self, binding_id: BindingId, event_sink: BackendEventSink) -> None:

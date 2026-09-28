@@ -59,6 +59,10 @@ class AuthenticationFlow(Protocol):
     async def close(self) -> None:
         ...
 
+    def credentials(self) -> bytes:
+        """Return provider credentials only after the flow reaches CONNECTED."""
+        ...
+
 
 class BackendPlugin(Protocol):
     @property

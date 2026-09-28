@@ -1,5 +1,5 @@
 """MAX backend adapter."""
 
-from .plugin import MaxBackendPlugin, MaxCredentials
+from .plugin import MaxAuthenticationFlow, MaxBackendPlugin, MaxCredentials
 
-__all__ = ["MaxBackendPlugin", "MaxCredentials"]
+__all__ = ["MaxAuthenticationFlow", "MaxBackendPlugin", "MaxCredentials"]
