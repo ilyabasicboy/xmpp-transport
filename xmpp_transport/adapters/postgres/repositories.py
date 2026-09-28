@@ -75,6 +75,18 @@ class AsyncpgBindingRepository:
             backend_id=BackendId(str(row["backend_id"])),
         )
 
+    async def xmpp_account_for_binding(self, binding_id: BindingId) -> Optional[str]:
+        value = await self._pool.fetchval(
+            """
+            SELECT account.bare_jid
+            FROM backend_bindings AS binding
+            JOIN xmpp_accounts AS account ON account.id = binding.xmpp_account_id
+            WHERE binding.binding_id = $1 AND binding.status = 'active'
+            """,
+            str(binding_id),
+        )
+        return str(value) if value is not None else None
+
     async def save_encrypted_credentials(
         self, binding_id: BindingId, backend_id: BackendId, credentials: bytes
     ) -> None:

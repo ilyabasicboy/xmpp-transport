@@ -72,6 +72,14 @@ class BindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(BindingId("binding-1"), record.binding_id)
         self.assertEqual(("user@example.com", "telegram"), pool.calls[0][1])
 
+    async def test_resolves_owner_for_active_binding(self) -> None:
+        pool = FakePool()
+        pool.value = "user@example.com"
+        repository = AsyncpgBindingRepository(pool)
+        owner = await repository.xmpp_account_for_binding(BindingId("binding-1"))
+        self.assertEqual("user@example.com", owner)
+        self.assertEqual(("binding-1",), pool.calls[0][1])
+
 
 class MessageMappingRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_save_mapping_is_idempotent_for_same_remote_id(self) -> None:
