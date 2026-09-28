@@ -45,3 +45,13 @@ class MessageMappingRepository(Protocol):
         remote_message_id: RemoteObjectId,
     ) -> None:
         ...
+
+    async def incoming_delivered(
+        self, binding_id: BindingId, remote_message_id: RemoteObjectId
+    ) -> bool:
+        ...
+
+    async def mark_incoming_delivered(
+        self, binding_id: BindingId, remote_message_id: RemoteObjectId
+    ) -> None:
+        ...

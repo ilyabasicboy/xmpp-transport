@@ -1,13 +1,16 @@
 """Small backend contracts; optional features are separate protocols."""
 
 from dataclasses import dataclass
-from typing import Mapping, Protocol, Sequence
+from typing import Mapping, Optional, Protocol, Sequence, Type, TypeVar
 
 from xmpp_transport.domain.auth import AuthChallenge, AuthResponse
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
 from xmpp_transport.domain.models import Contact, Conversation, OutgoingMessage
 
 from .events import BackendEventSink
+
+
+FeatureT = TypeVar("FeatureT")
 
 
 @dataclass(frozen=True)
@@ -68,4 +71,17 @@ class BackendPlugin(Protocol):
     def create_session(
         self, binding_id: BindingId, credentials: bytes, event_sink: BackendEventSink
     ) -> BackendSession:
+        ...
+
+
+class BackendFeatureProvider(Protocol):
+    async def feature(
+        self, binding_id: BindingId, feature_type: Type[FeatureT]
+    ) -> Optional[FeatureT]:
+        """Return an active binding feature, or None when it is unavailable."""
+        ...
+
+
+class BackendPluginProvider(Protocol):
+    def get(self, backend_id: BackendId) -> BackendPlugin:
         ...

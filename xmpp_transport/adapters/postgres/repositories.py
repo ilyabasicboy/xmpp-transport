@@ -118,3 +118,32 @@ class AsyncpgMessageMappingRepository:
             raise DuplicateOperation(
                 "client message already maps to a different remote message"
             )
+
+    async def incoming_delivered(
+        self, binding_id: BindingId, remote_message_id: RemoteObjectId
+    ) -> bool:
+        value = await self._pool.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM incoming_message_deliveries
+                WHERE binding_id = $1 AND remote_message_id = $2
+            )
+            """,
+            str(binding_id),
+            str(remote_message_id),
+        )
+        return bool(value)
+
+    async def mark_incoming_delivered(
+        self, binding_id: BindingId, remote_message_id: RemoteObjectId
+    ) -> None:
+        await self._pool.execute(
+            """
+            INSERT INTO incoming_message_deliveries (binding_id, remote_message_id)
+            VALUES ($1, $2)
+            ON CONFLICT DO NOTHING
+            """,
+            str(binding_id),
+            str(remote_message_id),
+        )

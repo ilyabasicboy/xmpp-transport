@@ -37,6 +37,13 @@ class ArchitectureTests(unittest.TestCase):
                 source = path.read_text(encoding="utf-8")
                 self.assertNotIn("xmpp_transport.adapters.backends", source, str(path))
 
+    def test_application_does_not_depend_on_runtime_or_adapters(self) -> None:
+        forbidden = ("xmpp_transport.runtime", "xmpp_transport.adapters")
+        for path in python_files(ROOT / "xmpp_transport" / "application"):
+            source = path.read_text(encoding="utf-8")
+            for dependency in forbidden:
+                self.assertNotIn(dependency, source, str(path))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,14 +2,16 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple, Type, TypeVar, cast
 
 from xmpp_transport.domain.errors import AuthorizationRequired, TransportError
 from xmpp_transport.domain.identifiers import BackendId, BindingId
-from xmpp_transport.ports.backend import BackendSession
+from xmpp_transport.ports.backend import BackendPluginProvider, BackendSession
 from xmpp_transport.ports.events import BackendEventSink
 from xmpp_transport.ports.repositories import BindingRecord, BindingRepository, CredentialCipher
-from xmpp_transport.runtime.registry import BackendRegistry
+
+
+FeatureT = TypeVar("FeatureT")
 
 
 @dataclass(frozen=True)
@@ -36,7 +38,7 @@ class SessionSupervisor:
 
     def __init__(
         self,
-        registry: BackendRegistry,
+        registry: BackendPluginProvider,
         bindings: BindingRepository,
         credential_cipher: CredentialCipher,
         event_sink: BackendEventSink,
@@ -104,6 +106,17 @@ class SessionSupervisor:
                 raise SessionLifecycleError(
                     (LifecycleFailure(binding_id, "stop", type(exc).__name__),)
                 ) from exc
+
+    async def feature(
+        self, binding_id: BindingId, feature_type: Type[FeatureT]
+    ) -> Optional[FeatureT]:
+        """Resolve an optional feature from a currently active session."""
+        async with self._state_lock:
+            managed = self._sessions.get(binding_id)
+            if managed is None:
+                return None
+            feature = managed.session.features().get(feature_type)
+        return cast(Optional[FeatureT], feature)
 
     async def restore(self) -> None:
         """Start all persisted active bindings and report failures as metadata."""

@@ -88,13 +88,32 @@ class MessageMappingRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(RemoteObjectId("not-a-number"), result)
 
+    async def test_incoming_delivery_lookup_is_boolean(self) -> None:
+        pool = FakePool()
+        pool.value = True
+        repository = AsyncpgMessageMappingRepository(pool)
+        self.assertTrue(
+            await repository.incoming_delivered(
+                BindingId("binding-1"), RemoteObjectId("remote-1")
+            )
+        )
+
+    async def test_mark_incoming_delivery_is_idempotent_sql(self) -> None:
+        pool = FakePool()
+        repository = AsyncpgMessageMappingRepository(pool)
+        await repository.mark_incoming_delivered(
+            BindingId("binding-1"), RemoteObjectId("remote-1")
+        )
+        self.assertIn("ON CONFLICT DO NOTHING", pool.calls[0][0])
+
 
 class MigrationTests(unittest.TestCase):
     def test_initial_migration_is_packaged(self) -> None:
         migrations = packaged_migrations()
-        self.assertEqual([1], [migration.version for migration in migrations])
+        self.assertEqual([1, 2], [migration.version for migration in migrations])
         self.assertIn("CREATE TABLE backend_bindings", migrations[0].sql)
         self.assertIn("CREATE TABLE message_mappings", migrations[0].sql)
+        self.assertIn("CREATE TABLE incoming_message_deliveries", migrations[1].sql)
 
 
 if __name__ == "__main__":

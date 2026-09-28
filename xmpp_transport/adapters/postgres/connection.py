@@ -1,14 +1,30 @@
 """Owned asyncpg pool lifecycle with migrations-before-readiness."""
 
-from typing import Any, Awaitable, Callable, Optional
-
-from xmpp_transport.runtime.config import DatabaseConfig
+from typing import Any, Awaitable, Callable, Optional, Protocol
 
 from .migrations import MigrationRunner
 
 
 PoolFactory = Callable[..., Awaitable[Any]]
 MigrationRunnerFactory = Callable[[Any], MigrationRunner]
+
+
+class DatabaseSettings(Protocol):
+    @property
+    def dsn(self) -> str:
+        ...
+
+    @property
+    def min_pool_size(self) -> int:
+        ...
+
+    @property
+    def max_pool_size(self) -> int:
+        ...
+
+    @property
+    def command_timeout(self) -> float:
+        ...
 
 
 async def _asyncpg_pool_factory(**kwargs: object) -> Any:
@@ -20,7 +36,7 @@ async def _asyncpg_pool_factory(**kwargs: object) -> Any:
 class PostgresPoolManager:
     def __init__(
         self,
-        config: DatabaseConfig,
+        config: DatabaseSettings,
         pool_factory: PoolFactory = _asyncpg_pool_factory,
         migration_runner_factory: MigrationRunnerFactory = MigrationRunner,
     ) -> None:
