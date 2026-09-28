@@ -21,5 +21,24 @@ entry-point group. Validate an installed backend without opening connections:
 xabber-transport --config transports.ini --backend telegram --check-config
 ```
 
+## Local smoke backend
+
+The built-in `fake` backend echoes an outbound direct message back through the
+normal backend event, deduplication, and XMPP delivery path. Copy
+`transports.example.ini`, set the two referenced environment variables, and
+create an active fake binding with an encrypted non-empty credential payload.
+
+Generate a Fernet key once and store it in the configured secret manager:
+
+```bash
+python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+```
+
+Then validate the local wiring without opening PostgreSQL, HTTP, or XMPP:
+
+```bash
+xabber-transport --config transports.ini --backend fake --check-config
+```
+
 Runtime integrations and their external dependencies will be introduced in
 later phases rather than leaking them into the domain package.

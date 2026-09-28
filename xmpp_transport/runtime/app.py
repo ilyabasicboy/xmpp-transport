@@ -64,7 +64,10 @@ def discover_backend_plugins() -> Sequence[BackendPlugin]:
         entries = available.select(group=BACKEND_ENTRY_POINT_GROUP)
     else:
         entries = available.get(BACKEND_ENTRY_POINT_GROUP, ())
-    return plugins_from_entry_points(entries)
+    external = plugins_from_entry_points(entries)
+    from xmpp_transport.adapters.backends.fake import FakeBackendPlugin
+
+    return (FakeBackendPlugin(),) + tuple(external)
 
 
 def plugins_from_entry_points(entries: Iterable[object]) -> Sequence[BackendPlugin]:
