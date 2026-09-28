@@ -1,6 +1,6 @@
 """aiohttp liveness and readiness endpoints."""
 
-from typing import Any, Optional
+from typing import Any, Callable, List, Optional
 
 from xmpp_transport.runtime.health import HealthState
 
@@ -18,6 +18,12 @@ class AiohttpHealthServer:
         self._port = port
         self._web = web_module
         self._runner: Optional[Any] = None
+        self._route_registrars: List[Callable[[Any, Any], None]] = []
+
+    def add_routes(self, registrar: Callable[[Any, Any], None]) -> None:
+        if self._runner is not None:
+            raise RuntimeError("HTTP server is already running")
+        self._route_registrars.append(registrar)
 
     async def start(self) -> None:
         if self._runner is not None:
@@ -31,6 +37,8 @@ class AiohttpHealthServer:
         application = web.Application()
         application.router.add_get("/live", self._live)
         application.router.add_get("/ready", self._ready)
+        for registrar in self._route_registrars:
+            registrar(application, web)
         runner = web.AppRunner(application)
         await runner.setup()
         try:

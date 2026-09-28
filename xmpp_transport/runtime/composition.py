@@ -12,7 +12,7 @@ from xmpp_transport.adapters.postgres import (
     PostgresPoolManager,
 )
 from xmpp_transport.adapters.security import FernetCredentialCipher
-from xmpp_transport.adapters.web import AiohttpHealthServer
+from xmpp_transport.adapters.web import AiohttpAuthenticationApi, AiohttpHealthServer
 from xmpp_transport.adapters.xmpp import (
     ComponentSettings,
     ContactAddressCodec,
@@ -92,6 +92,7 @@ class SingleBackendRuntime:
         self._roster = roster
         self._application: Optional[ApplicationRuntime] = None
         self._authentication: Optional[AuthenticationCoordinator] = None
+        self._authentication_http: Optional[AiohttpAuthenticationApi] = None
         self._closed = False
 
     @property
@@ -104,17 +105,23 @@ class SingleBackendRuntime:
             raise RuntimeError("runtime authentication is not initialized")
         return self._authentication
 
+    @property
+    def authentication_http(self) -> AiohttpAuthenticationApi:
+        if self._authentication_http is None:
+            raise RuntimeError("runtime authentication HTTP API is not initialized")
+        return self._authentication_http
+
     async def start(self) -> None:
         if self._closed:
             raise RuntimeError("single backend runtime is closed")
         if self._application is not None:
             return
-        await self._health_server.start()
         try:
             pool = await self._database.start()
-            application, authentication = self._build_application(pool)
+            application, authentication, authentication_http = self._build_application(pool)
             self._application = application
             self._authentication = authentication
+            self._authentication_http = authentication_http
             await application.start()
         except BaseException:
             self._health.mark_failed()
@@ -127,6 +134,7 @@ class SingleBackendRuntime:
         application = self._application
         self._application = None
         self._authentication = None
+        self._authentication_http = None
         if application is not None:
             await application.close()
             return
@@ -170,6 +178,8 @@ class SingleBackendRuntime:
             self._cipher,
             sessions,
         )
+        authentication_http = AiohttpAuthenticationApi(authentication)
+        self._health_server.add_routes(authentication_http.register)
         application = ApplicationRuntime(
             self._health,
             self._health_server,
@@ -177,9 +187,9 @@ class SingleBackendRuntime:
             sessions,
             event_bus,
             gateways=(gateway,),
-            managed_resources=(authentication,),
+            managed_resources=(authentication, authentication_http),
         )
-        return application, authentication
+        return application, authentication, authentication_http
 
     @staticmethod
     def _authorization_lost_handler(sessions: SessionSupervisor):  # type: ignore[no-untyped-def]
