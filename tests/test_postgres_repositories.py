@@ -69,6 +69,16 @@ class BindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 BindingId("missing"), BackendId("telegram"), b"encrypted"
             )
 
+    async def test_credential_update_activates_binding(self) -> None:
+        pool = FakePool()
+        repository = AsyncpgBindingRepository(pool)
+
+        await repository.save_encrypted_credentials(
+            BindingId("binding-1"), BackendId("max"), b"encrypted"
+        )
+
+        self.assertIn("status = 'active'", pool.calls[0][0])
+
     async def test_resolves_active_binding_by_owner_and_backend(self) -> None:
         pool = FakePool()
         pool.row = {"binding_id": "binding-1", "backend_id": "telegram"}

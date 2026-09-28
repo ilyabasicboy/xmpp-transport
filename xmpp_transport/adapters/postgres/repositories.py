@@ -107,7 +107,9 @@ class AsyncpgBindingRepository:
         status = await self._pool.execute(
             """
             UPDATE backend_bindings
-            SET encrypted_credentials = $3, updated_at = CURRENT_TIMESTAMP
+            SET encrypted_credentials = $3,
+                status = 'active',
+                updated_at = CURRENT_TIMESTAMP
             WHERE binding_id = $1 AND backend_id = $2
             """,
             str(binding_id),
