@@ -2,7 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import Awaitable, List, Optional, Protocol, Tuple
+from typing import Awaitable, List, Optional, Protocol, Sequence, Tuple
 
 from .health import HealthState
 
@@ -77,12 +77,14 @@ class ApplicationRuntime:
         database: StartableResource,
         sessions: RestorableResource,
         event_bus: ClosableResource,
+        gateways: Sequence[StartableResource] = (),
     ) -> None:
         self._health = health
         self._health_server = health_server
         self._database = database
         self._sessions = sessions
         self._event_bus = event_bus
+        self._gateways = tuple(gateways)
         self._started = False
         self._closed = False
 
@@ -95,6 +97,8 @@ class ApplicationRuntime:
         try:
             await self._health_server.start()
             await self._database.start()
+            for gateway in self._gateways:
+                await gateway.start()
             await self._sessions.restore()
         except BaseException:
             self._health.mark_failed()
@@ -110,6 +114,7 @@ class ApplicationRuntime:
         for name, resource in (
             ("sessions", self._sessions),
             ("event_bus", self._event_bus),
+            *(("gateway", gateway) for gateway in reversed(self._gateways)),
             ("database", self._database),
             ("health_server", self._health_server),
         ):

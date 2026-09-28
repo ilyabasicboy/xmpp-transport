@@ -22,18 +22,32 @@ class DatabasePool(Protocol):
 
 
 class AsyncpgBindingRepository:
-    def __init__(self, pool: DatabasePool) -> None:
+    def __init__(
+        self, pool: DatabasePool, backend_id: Optional[BackendId] = None
+    ) -> None:
         self._pool = pool
+        self._backend_id = backend_id
 
     async def active_bindings(self) -> Sequence[BindingRecord]:
-        rows = await self._pool.fetch(
-            """
-            SELECT binding_id, backend_id
-            FROM backend_bindings
-            WHERE status = 'active'
-            ORDER BY binding_id
-            """
-        )
+        if self._backend_id is None:
+            rows = await self._pool.fetch(
+                """
+                SELECT binding_id, backend_id
+                FROM backend_bindings
+                WHERE status = 'active'
+                ORDER BY binding_id
+                """
+            )
+        else:
+            rows = await self._pool.fetch(
+                """
+                SELECT binding_id, backend_id
+                FROM backend_bindings
+                WHERE status = 'active' AND backend_id = $1
+                ORDER BY binding_id
+                """,
+                str(self._backend_id),
+            )
         return tuple(
             BindingRecord(
                 binding_id=BindingId(str(row["binding_id"])),

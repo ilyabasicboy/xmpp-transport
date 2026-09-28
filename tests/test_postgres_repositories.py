@@ -45,6 +45,13 @@ class BindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(BindingId("binding-1"), records[0].binding_id)
         self.assertEqual(BackendId("telegram"), records[0].backend_id)
 
+    async def test_active_bindings_can_be_scoped_to_one_backend(self) -> None:
+        pool = FakePool()
+        repository = AsyncpgBindingRepository(pool, BackendId("telegram"))
+        await repository.active_bindings()
+        self.assertIn("backend_id = $1", pool.calls[0][0])
+        self.assertEqual(("telegram",), pool.calls[0][1])
+
     async def test_credentials_are_copied_from_database_buffer(self) -> None:
         pool = FakePool()
         pool.value = bytearray(b"encrypted")

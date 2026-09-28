@@ -2,7 +2,7 @@
 
 from .addressing import ContactAddressCodec, DirectRouteResolver, InvalidXmppAddress
 from .component import ComponentSettings, SlixmppComponentWire
-from .gateway import XmppDirectMessageGateway
+from .gateway import XmppDirectMessageGateway, XmppMessageDelivery
 from .message_codec import XmppMessageCodec, XmppMessageError
 
 __all__ = [
@@ -12,6 +12,7 @@ __all__ = [
     "InvalidXmppAddress",
     "SlixmppComponentWire",
     "XmppDirectMessageGateway",
+    "XmppMessageDelivery",
     "XmppMessageCodec",
     "XmppMessageError",
 ]

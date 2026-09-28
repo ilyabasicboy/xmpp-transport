@@ -79,15 +79,37 @@ class XmppDirectMessageGateway:
             await self._send_error(stanza, XmppMessageError.SERVICE_UNAVAILABLE)
 
     async def deliver_message(self, message: IncomingMessage) -> None:
-        owner_jid = await self._bindings.xmpp_account_for_binding(message.binding_id)
-        if owner_jid is None:
-            raise LookupError("active XMPP account not found for binding")
-        sender_jid = self._addresses.contact_jid(message.conversation_id)
-        stanza = self._codec.serialize_incoming(message, sender_jid, owner_jid)
-        await self._wire.send(stanza)
+        delivery = XmppMessageDelivery(
+            self._wire, self._addresses, self._bindings, self._codec
+        )
+        await delivery.deliver_message(message)
 
     async def _send_error(
         self, request: ET.Element, condition: XmppMessageError
     ) -> None:
         response = self._codec.error_reply(request, condition)
         await self._wire.send(response)
+
+
+class XmppMessageDelivery:
+    """Outbound XMPP sink separated from stanza ingestion for acyclic wiring."""
+
+    def __init__(
+        self,
+        wire: XmppWire,
+        addresses: ContactAddressCodec,
+        bindings: BindingRepository,
+        codec: XmppMessageCodec,
+    ) -> None:
+        self._wire = wire
+        self._addresses = addresses
+        self._bindings = bindings
+        self._codec = codec
+
+    async def deliver_message(self, message: IncomingMessage) -> None:
+        owner_jid = await self._bindings.xmpp_account_for_binding(message.binding_id)
+        if owner_jid is None:
+            raise LookupError("active XMPP account not found for binding")
+        sender_jid = self._addresses.contact_jid(message.conversation_id)
+        stanza = self._codec.serialize_incoming(message, sender_jid, owner_jid)
+        await self._wire.send(stanza)
