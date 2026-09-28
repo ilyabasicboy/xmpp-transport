@@ -69,6 +69,10 @@ class PluginDiscoveryTests(unittest.TestCase):
         plugins = discover_backend_plugins()
         self.assertIn(BackendId("fake"), [plugin.backend_id for plugin in plugins])
 
+    def test_builtin_max_backend_is_discoverable(self) -> None:
+        plugins = discover_backend_plugins()
+        self.assertIn(BackendId("max"), [plugin.backend_id for plugin in plugins])
+
     def test_loads_plugin_instance_and_class(self) -> None:
         class OtherPlugin:
             backend_id = BackendId("other")
