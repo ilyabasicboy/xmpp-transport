@@ -1,7 +1,7 @@
 """Direct-message boundary between XEP-0114 wire traffic and the application."""
 
 import logging
-from typing import Awaitable, Callable, Protocol
+from typing import Awaitable, Callable, Optional, Protocol
 from xml.etree import ElementTree as ET
 
 from xmpp_transport.application.message_router import MessageRouter
@@ -15,6 +15,14 @@ from .message_codec import XmppMessageCodec, XmppMessageError
 
 log = logging.getLogger(__name__)
 MessageHandler = Callable[[ET.Element], Awaitable[None]]
+
+
+class ControlHandler(Protocol):
+    def accepts(self, to_jid: str) -> bool:
+        ...
+
+    async def handle(self, from_jid: str, command: str) -> str:
+        ...
 
 
 class XmppWire(Protocol):
@@ -40,6 +48,7 @@ class XmppDirectMessageGateway:
         bindings: BindingRepository,
         messages: MessageRouter,
         codec: XmppMessageCodec,
+        control: Optional[ControlHandler] = None,
     ) -> None:
         self._wire = wire
         self._routes = routes
@@ -47,6 +56,7 @@ class XmppDirectMessageGateway:
         self._bindings = bindings
         self._messages = messages
         self._codec = codec
+        self._control = control
         self._wire.set_message_handler(self.handle_stanza)
 
     async def start(self) -> None:
@@ -57,6 +67,19 @@ class XmppDirectMessageGateway:
 
     async def handle_stanza(self, stanza: ET.Element) -> None:
         try:
+            if self._control is not None and self._control.accepts(
+                stanza.attrib.get("to", "")
+            ):
+                body = ""
+                for child in stanza:
+                    if child.tag.rsplit("}", 1)[-1] == "body":
+                        body = "".join(child.itertext())
+                        break
+                response_text = await self._control.handle(
+                    stanza.attrib.get("from", ""), body
+                )
+                await self._wire.send(self._codec.text_reply(stanza, response_text))
+                return
             route = await self._routes.resolve(
                 stanza.attrib.get("from", ""), stanza.attrib.get("to", "")
             )

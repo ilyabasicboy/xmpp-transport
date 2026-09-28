@@ -58,10 +58,14 @@ class Cipher:
 class Sessions:
     def __init__(self) -> None:
         self.started = []
+        self.stopped = []
 
     async def start(self, binding_id, backend_id):  # type: ignore[no-untyped-def]
         self.started.append((binding_id, backend_id))
         return object()
+
+    async def stop(self, binding_id):  # type: ignore[no-untyped-def]
+        self.stopped.append(binding_id)
 
 
 class AuthenticationCoordinatorTests(unittest.IsolatedAsyncioTestCase):
@@ -93,6 +97,7 @@ class AuthenticationCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             [(binding_id, backend_id, b"encrypted:private")], self.bindings.saved
         )
         self.assertEqual([(binding_id, backend_id)], self.sessions.started)
+        self.assertEqual([binding_id], self.sessions.stopped)
         self.assertEqual(1, self.plugin.flows[0].closed)
 
     async def test_restarting_flow_closes_previous_one(self) -> None:

@@ -22,6 +22,11 @@ class BindingRepository(Protocol):
     ) -> Optional[BindingRecord]:
         ...
 
+    async def binding_for_authentication(
+        self, bare_jid: str, backend_id: BackendId
+    ) -> Optional[BindingRecord]:
+        ...
+
     async def xmpp_account_for_binding(self, binding_id: BindingId) -> Optional[str]:
         ...
 

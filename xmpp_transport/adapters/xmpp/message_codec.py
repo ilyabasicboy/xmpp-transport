@@ -105,6 +105,21 @@ class XmppMessageCodec:
             ET.SubElement(error, _tag(STANZAS_NS, "text")).text = public_text
         return response
 
+    def text_reply(self, request: ET.Element, text: str) -> ET.Element:
+        if not text or len(text) > self.MAX_BODY_LENGTH:
+            raise ValueError("reply text is invalid")
+        attributes = {"type": "chat"}
+        if request.attrib.get("to"):
+            attributes["from"] = request.attrib["to"]
+        if request.attrib.get("from"):
+            attributes["to"] = request.attrib["from"]
+        request_id = request.attrib.get("id")
+        if request_id:
+            attributes["id"] = _bounded_id(request_id, self.MAX_ID_LENGTH)
+        response = ET.Element("message", attributes)
+        ET.SubElement(response, "body").text = text
+        return response
+
     def _client_message_id(self, element: ET.Element) -> str:
         origin = element.find(_tag(SID_NS, "origin-id"))
         origin_id = origin.attrib.get("id") if origin is not None else None

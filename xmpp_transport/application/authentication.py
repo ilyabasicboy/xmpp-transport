@@ -15,6 +15,9 @@ class SessionStarter(Protocol):
     async def start(self, binding_id: BindingId, backend_id: BackendId) -> object:
         ...
 
+    async def stop(self, binding_id: BindingId) -> None:
+        ...
+
 
 @dataclass
 class _ManagedFlow:
@@ -79,6 +82,7 @@ class AuthenticationCoordinator:
                 await self._bindings.save_encrypted_credentials(
                     binding_id, backend_id, encrypted
                 )
+                await self._sessions.stop(binding_id)
                 await self._sessions.start(binding_id, backend_id)
                 self._flows.pop(binding_id, None)
                 await flow.close()

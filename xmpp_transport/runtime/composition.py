@@ -19,6 +19,7 @@ from xmpp_transport.adapters.xmpp import (
     DirectRouteResolver,
     SlixmppComponentWire,
     XmppDirectMessageGateway,
+    XmppAuthenticationCommands,
     XmppMessageCodec,
     XmppMessageDelivery,
 )
@@ -154,10 +155,6 @@ class SingleBackendRuntime:
         delivery = XmppMessageDelivery(self._wire, addresses, bindings, codec)
         messages = MessageRouter(sessions, mappings, delivery)
         routes = DirectRouteResolver(self._plugin.backend_id, addresses, bindings)
-        gateway = XmppDirectMessageGateway(
-            self._wire, routes, addresses, bindings, messages, codec
-        )
-
         dispatcher = BackendEventDispatcher()
         dispatcher.register(MessageReceived, messages.receive)
         dispatcher.register(AuthorizationLost, self._authorization_lost_handler(sessions))
@@ -180,6 +177,27 @@ class SingleBackendRuntime:
         )
         authentication_http = AiohttpAuthenticationApi(authentication)
         self._health_server.add_routes(authentication_http.register)
+        auth_public_base_url = self._backend.options.get("auth_public_base_url", "")
+        control = (
+            XmppAuthenticationCommands(
+                self._plugin.backend_id,
+                self._backend.component_domain,
+                auth_public_base_url,
+                bindings,
+                authentication_http,
+            )
+            if auth_public_base_url
+            else None
+        )
+        gateway = XmppDirectMessageGateway(
+            self._wire,
+            routes,
+            addresses,
+            bindings,
+            messages,
+            codec,
+            control=control,
+        )
         application = ApplicationRuntime(
             self._health,
             self._health_server,

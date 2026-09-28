@@ -89,6 +89,18 @@ class BindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(BindingId("binding-1"), record.binding_id)
         self.assertEqual(("user@example.com", "telegram"), pool.calls[0][1])
 
+    async def test_resolves_pending_binding_for_authentication(self) -> None:
+        pool = FakePool()
+        pool.row = {"binding_id": "binding-1", "backend_id": "max"}
+        repository = AsyncpgBindingRepository(pool)
+
+        record = await repository.binding_for_authentication(
+            "user@example.com", BackendId("max")
+        )
+
+        self.assertEqual(BindingId("binding-1"), record.binding_id)
+        self.assertIn("'pending'", pool.calls[0][0])
+
     async def test_resolves_owner_for_active_binding(self) -> None:
         pool = FakePool()
         pool.value = "user@example.com"
