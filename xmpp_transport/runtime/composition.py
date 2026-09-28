@@ -23,6 +23,7 @@ from xmpp_transport.adapters.xmpp import (
     XmppMessageDelivery,
 )
 from xmpp_transport.application import (
+    AuthenticationCoordinator,
     BackendEventDispatcher,
     MessageRouter,
     RosterSync,
@@ -90,11 +91,18 @@ class SingleBackendRuntime:
         self._cipher = cipher
         self._roster = roster
         self._application: Optional[ApplicationRuntime] = None
+        self._authentication: Optional[AuthenticationCoordinator] = None
         self._closed = False
 
     @property
     def health(self) -> HealthState:
         return self._health
+
+    @property
+    def authentication(self) -> AuthenticationCoordinator:
+        if self._authentication is None:
+            raise RuntimeError("runtime authentication is not initialized")
+        return self._authentication
 
     async def start(self) -> None:
         if self._closed:
@@ -104,8 +112,9 @@ class SingleBackendRuntime:
         await self._health_server.start()
         try:
             pool = await self._database.start()
-            application = self._build_application(pool)
+            application, authentication = self._build_application(pool)
             self._application = application
+            self._authentication = authentication
             await application.start()
         except BaseException:
             self._health.mark_failed()
@@ -117,6 +126,7 @@ class SingleBackendRuntime:
         self._closed = True
         application = self._application
         self._application = None
+        self._authentication = None
         if application is not None:
             await application.close()
             return
@@ -154,14 +164,22 @@ class SingleBackendRuntime:
 
         event_bus = InMemoryEventBus(dispatcher)
         relay.bind(event_bus)
-        return ApplicationRuntime(
+        authentication = AuthenticationCoordinator(
+            registry,
+            bindings,
+            self._cipher,
+            sessions,
+        )
+        application = ApplicationRuntime(
             self._health,
             self._health_server,
             self._database,
             sessions,
             event_bus,
             gateways=(gateway,),
+            managed_resources=(authentication,),
         )
+        return application, authentication
 
     @staticmethod
     def _authorization_lost_handler(sessions: SessionSupervisor):  # type: ignore[no-untyped-def]

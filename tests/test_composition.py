@@ -78,6 +78,8 @@ class CompositionTests(unittest.TestCase):
             },
         )
         self.assertEqual("starting", runtime.health.snapshot().status.value)
+        with self.assertRaisesRegex(RuntimeError, "not initialized"):
+            _ = runtime.authentication
 
     def test_requires_database_and_component_secret(self) -> None:
         key = Fernet.generate_key().decode("ascii")

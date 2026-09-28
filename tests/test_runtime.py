@@ -168,7 +168,15 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         database = OrderedResource("database", calls)
         sessions = OrderedResource("sessions", calls)
         events = OrderedResource("events", calls)
-        runtime = ApplicationRuntime(health, server, database, sessions, events)
+        authentication = OrderedResource("authentication", calls)
+        runtime = ApplicationRuntime(
+            health,
+            server,
+            database,
+            sessions,
+            events,
+            managed_resources=(authentication,),
+        )
 
         self.assertEqual(RuntimeStatus.STARTING, health.snapshot().status)
         await runtime.start()
@@ -180,6 +188,7 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "start:health",
                 "start:database",
                 "restore:sessions",
+                "close:authentication",
                 "close:sessions",
                 "close:events",
                 "close:database",

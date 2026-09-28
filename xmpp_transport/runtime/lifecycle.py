@@ -78,6 +78,7 @@ class ApplicationRuntime:
         sessions: RestorableResource,
         event_bus: ClosableResource,
         gateways: Sequence[StartableResource] = (),
+        managed_resources: Sequence[ClosableResource] = (),
     ) -> None:
         self._health = health
         self._health_server = health_server
@@ -85,6 +86,7 @@ class ApplicationRuntime:
         self._sessions = sessions
         self._event_bus = event_bus
         self._gateways = tuple(gateways)
+        self._managed_resources = tuple(managed_resources)
         self._started = False
         self._closed = False
 
@@ -112,6 +114,7 @@ class ApplicationRuntime:
         self._health.mark_stopping()
         failures = []
         for name, resource in (
+            *(("managed_resource", resource) for resource in reversed(self._managed_resources)),
             ("sessions", self._sessions),
             ("event_bus", self._event_bus),
             *(("gateway", gateway) for gateway in reversed(self._gateways)),
