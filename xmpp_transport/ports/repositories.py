@@ -17,6 +17,11 @@ class BindingRepository(Protocol):
     async def encrypted_credentials(self, binding_id: BindingId) -> Optional[bytes]:
         ...
 
+    async def binding_for_xmpp_account(
+        self, bare_jid: str, backend_id: BackendId
+    ) -> Optional[BindingRecord]:
+        ...
+
     async def save_encrypted_credentials(
         self, binding_id: BindingId, backend_id: BackendId, credentials: bytes
     ) -> None:

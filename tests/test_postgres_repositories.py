@@ -16,6 +16,7 @@ class FakePool:
         self.rows: Sequence[Any] = ()
         self.value: Optional[Any] = None
         self.status = "UPDATE 1"
+        self.row: Optional[Any] = None
         self.calls: List[Tuple[str, Tuple[object, ...]]] = []
 
     async def fetch(self, query: str, *args: object) -> Sequence[Any]:
@@ -24,7 +25,7 @@ class FakePool:
 
     async def fetchrow(self, query: str, *args: object) -> Optional[Any]:
         self.calls.append((query, args))
-        return None
+        return self.row
 
     async def fetchval(self, query: str, *args: object) -> Optional[Any]:
         self.calls.append((query, args))
@@ -60,6 +61,16 @@ class BindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
             await repository.save_encrypted_credentials(
                 BindingId("missing"), BackendId("telegram"), b"encrypted"
             )
+
+    async def test_resolves_active_binding_by_owner_and_backend(self) -> None:
+        pool = FakePool()
+        pool.row = {"binding_id": "binding-1", "backend_id": "telegram"}
+        repository = AsyncpgBindingRepository(pool)
+        record = await repository.binding_for_xmpp_account(
+            "user@example.com", BackendId("telegram")
+        )
+        self.assertEqual(BindingId("binding-1"), record.binding_id)
+        self.assertEqual(("user@example.com", "telegram"), pool.calls[0][1])
 
 
 class MessageMappingRepositoryTests(unittest.IsolatedAsyncioTestCase):
@@ -111,10 +122,11 @@ class MessageMappingRepositoryTests(unittest.IsolatedAsyncioTestCase):
 class MigrationTests(unittest.TestCase):
     def test_initial_migration_is_packaged(self) -> None:
         migrations = packaged_migrations()
-        self.assertEqual([1, 2], [migration.version for migration in migrations])
+        self.assertEqual([1, 2, 3], [migration.version for migration in migrations])
         self.assertIn("CREATE TABLE backend_bindings", migrations[0].sql)
         self.assertIn("CREATE TABLE message_mappings", migrations[0].sql)
         self.assertIn("CREATE TABLE incoming_message_deliveries", migrations[1].sql)
+        self.assertIn("xmpp_account_id, backend_id", migrations[2].sql)
 
 
 class RosterSyncRepositoryTests(unittest.IsolatedAsyncioTestCase):

@@ -62,4 +62,3 @@ CREATE TABLE media_references (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (binding_id, media_id)
 );
-
