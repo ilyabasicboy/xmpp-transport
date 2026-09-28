@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Union
+from typing import ClassVar, Optional, Union
 
 from .identifiers import BackendId, BindingId, CorrelationId, EventId
 from .models import Contact, Conversation, IncomingMessage
@@ -36,36 +36,42 @@ class EventEnvelope:
 
 @dataclass(frozen=True)
 class MessageReceived:
+    EVENT_TYPE: ClassVar[str] = "message.received"
     envelope: EventEnvelope
     message: IncomingMessage
 
 
 @dataclass(frozen=True)
 class MessageChanged:
+    EVENT_TYPE: ClassVar[str] = "message.changed"
     envelope: EventEnvelope
     message: IncomingMessage
 
 
 @dataclass(frozen=True)
 class ConversationChanged:
+    EVENT_TYPE: ClassVar[str] = "conversation.changed"
     envelope: EventEnvelope
     conversation: Conversation
 
 
 @dataclass(frozen=True)
 class ContactChanged:
+    EVENT_TYPE: ClassVar[str] = "contact.changed"
     envelope: EventEnvelope
     contact: Contact
 
 
 @dataclass(frozen=True)
 class AuthorizationLost:
+    EVENT_TYPE: ClassVar[str] = "authorization.lost"
     envelope: EventEnvelope
     reason: str
 
 
 @dataclass(frozen=True)
 class SessionStateChanged:
+    EVENT_TYPE: ClassVar[str] = "session.state_changed"
     envelope: EventEnvelope
     state: SessionState
     detail: Optional[str] = None
@@ -79,4 +85,3 @@ BackendEvent = Union[
     AuthorizationLost,
     SessionStateChanged,
 ]
-

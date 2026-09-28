@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timezone
 
 from xmpp_transport.domain.auth import AuthResponse, AuthResponseKind, AuthChallenge, AuthState
-from xmpp_transport.domain.events import EventEnvelope
+from xmpp_transport.domain.events import EventEnvelope, MessageReceived
 from xmpp_transport.domain.identifiers import BackendId, BindingId, EventId, RemoteObjectId
 from xmpp_transport.domain.models import OutgoingMessage
 
@@ -17,6 +17,9 @@ class IdentifierTests(unittest.TestCase):
 
 
 class ModelTests(unittest.TestCase):
+    def test_event_payload_has_stable_type_name(self) -> None:
+        self.assertEqual("message.received", MessageReceived.EVENT_TYPE)
+
     def test_authentication_url_must_use_https(self) -> None:
         with self.assertRaises(ValueError):
             AuthChallenge(AuthState.WAITING_QR, public_url="http://example.com/auth")
