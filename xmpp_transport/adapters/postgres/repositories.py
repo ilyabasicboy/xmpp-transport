@@ -1,6 +1,7 @@
 """PostgreSQL implementations of shared repository ports."""
 
 from typing import Any, Optional, Protocol, Sequence
+from uuid import uuid4
 
 from xmpp_transport.domain.errors import DuplicateOperation
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
@@ -27,6 +28,43 @@ class AsyncpgBindingRepository:
     ) -> None:
         self._pool = pool
         self._backend_id = backend_id
+
+    async def ensure_binding(
+        self, bare_jid: str, backend_id: BackendId
+    ) -> BindingRecord:
+        account_id = uuid4()
+        binding_id = BindingId(str(uuid4()))
+        row = await self._pool.fetchrow(
+            """
+            WITH account AS (
+                INSERT INTO xmpp_accounts (id, bare_jid)
+                VALUES ($1, $2)
+                ON CONFLICT (bare_jid) DO UPDATE
+                SET updated_at = CURRENT_TIMESTAMP
+                RETURNING id
+            ), binding AS (
+                INSERT INTO backend_bindings (
+                    binding_id, xmpp_account_id, backend_id, status
+                )
+                SELECT $3, account.id, $4, 'pending'
+                FROM account
+                ON CONFLICT (xmpp_account_id, backend_id) DO UPDATE
+                SET updated_at = CURRENT_TIMESTAMP
+                RETURNING binding_id, backend_id
+            )
+            SELECT binding_id, backend_id FROM binding
+            """,
+            account_id,
+            bare_jid,
+            str(binding_id),
+            str(backend_id),
+        )
+        if row is None:
+            raise RuntimeError("binding upsert did not return a row")
+        return BindingRecord(
+            binding_id=BindingId(str(row["binding_id"])),
+            backend_id=BackendId(str(row["backend_id"])),
+        )
 
     async def active_bindings(self) -> Sequence[BindingRecord]:
         if self._backend_id is None:

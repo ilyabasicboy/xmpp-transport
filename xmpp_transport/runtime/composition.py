@@ -171,6 +171,7 @@ class SingleBackendRuntime:
             self._backend.component_domain,
             bindings,
             authentication,
+            control_localpart=self._backend.options.get("control_localpart", "bot"),
         )
         gateway = XmppDirectMessageGateway(
             self._wire,

@@ -10,6 +10,11 @@ class Bindings:
     def __init__(self) -> None:
         self.record = BindingRecord(BindingId("binding-1"), BackendId("max"))
         self.lookup = None
+        self.ensured = None
+
+    async def ensure_binding(self, bare_jid, backend_id):  # type: ignore[no-untyped-def]
+        self.ensured = (bare_jid, backend_id)
+        return self.record
 
     async def binding_for_authentication(self, bare_jid, backend_id):  # type: ignore[no-untyped-def]
         self.lookup = (bare_jid, backend_id)
@@ -43,9 +48,11 @@ class XmppAuthenticationCommandTests(unittest.IsolatedAsyncioTestCase):
 
         response = await commands.handle("user@example.com/device", "/login")
 
-        self.assertTrue(commands.accepts("max.example.com"))
+        self.assertTrue(commands.accepts("bot@max.example.com"))
+        self.assertTrue(commands.accepts("bot@max.example.com/mobile"))
+        self.assertFalse(commands.accepts("max.example.com"))
         self.assertFalse(commands.accepts("chat-1@max.example.com"))
-        self.assertEqual(("user@example.com", BackendId("max")), bindings.lookup)
+        self.assertEqual(("user@example.com", BackendId("max")), bindings.ensured)
         self.assertEqual(
             (BindingId("binding-1"), BackendId("max")), authentication.begun
         )

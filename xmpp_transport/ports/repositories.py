@@ -11,6 +11,11 @@ class BindingRecord:
 
 
 class BindingRepository(Protocol):
+    async def ensure_binding(
+        self, bare_jid: str, backend_id: BackendId
+    ) -> BindingRecord:
+        ...
+
     async def active_bindings(self) -> Sequence[BindingRecord]:
         ...
 

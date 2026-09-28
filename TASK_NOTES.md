@@ -280,6 +280,10 @@ max.example.com
 This preserves existing JIDs, avoids remote-ID collisions, makes the provider
 selection explicit, and permits independent deployment.
 
+The user-facing control contact is a valid JID under that component domain,
+normally `bot@telegram.example.com` or `bot@max.example.com`. Provider contact
+and conversation JIDs use separate localparts.
+
 Every background task must have a clear owner and shutdown path. Python 3.9 has
 no `asyncio.TaskGroup`, so implement explicit supervision with `create_task`,
 `gather`, cancellation, and deterministic resource cleanup.

@@ -37,6 +37,20 @@ class FakePool:
 
 
 class BindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ensure_binding_upserts_account_and_pending_binding(self) -> None:
+        pool = FakePool()
+        pool.row = {"binding_id": "binding-1", "backend_id": "max"}
+        repository = AsyncpgBindingRepository(pool)
+
+        record = await repository.ensure_binding("user@example.com", BackendId("max"))
+
+        self.assertEqual(BindingId("binding-1"), record.binding_id)
+        query, arguments = pool.calls[0]
+        self.assertIn("ON CONFLICT (bare_jid)", query)
+        self.assertIn("ON CONFLICT (xmpp_account_id, backend_id)", query)
+        self.assertEqual("user@example.com", arguments[1])
+        self.assertEqual("max", arguments[3])
+
     async def test_active_bindings_are_mapped_to_strong_ids(self) -> None:
         pool = FakePool()
         pool.rows = [{"binding_id": "binding-1", "backend_id": "telegram"}]

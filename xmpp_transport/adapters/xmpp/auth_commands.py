@@ -15,14 +15,20 @@ class XmppAuthenticationCommands:
         component_domain: str,
         bindings: BindingRepository,
         authentication: AuthenticationCoordinator,
+        control_localpart: str = "bot",
     ) -> None:
         self._backend_id = backend_id
-        self._component_domain = component_domain
+        localpart = control_localpart.strip().lower()
+        if not localpart or "@" in localpart or "/" in localpart:
+            raise ValueError("control localpart is invalid")
+        self._control_jid = "{}@{}".format(
+            localpart, component_domain.strip().lower()
+        )
         self._bindings = bindings
         self._authentication = authentication
 
     def accepts(self, to_jid: str) -> bool:
-        return to_jid.split("/", 1)[0].strip().lower() == self._component_domain
+        return to_jid.split("/", 1)[0].strip().lower() == self._control_jid
 
     async def handle(self, from_jid: str, command: str) -> str:
         value = command.strip()
@@ -31,20 +37,24 @@ class XmppAuthenticationCommands:
         if command_name not in ("/login", "/continue", "/password"):
             return "Доступные команды: /login, /continue, /password <пароль>"
         owner = bare_jid(from_jid)
-        binding = await self._bindings.binding_for_authentication(owner, self._backend_id)
-        if binding is None:
-            raise LookupError("binding is not available for authentication")
         if command_name == "/login":
+            binding = await self._bindings.ensure_binding(owner, self._backend_id)
             challenge = await self._authentication.begin(
                 binding.binding_id, self._backend_id
             )
-        elif command_name == "/continue":
+        else:
+            binding = await self._bindings.binding_for_authentication(
+                owner, self._backend_id
+            )
+            if binding is None:
+                raise LookupError("binding is not available for authentication")
+        if command_name == "/continue":
             challenge = await self._authentication.respond(
                 binding.binding_id,
                 self._backend_id,
                 AuthResponse(AuthResponseKind.CONFIRMATION, "confirmed"),
             )
-        else:
+        elif command_name == "/password":
             if not argument:
                 return "Использование: /password <пароль>"
             challenge = await self._authentication.respond(
