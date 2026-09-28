@@ -5,6 +5,7 @@ from xmpp_transport.adapters.postgres.migrations import packaged_migrations
 from xmpp_transport.adapters.postgres.repositories import (
     AsyncpgBindingRepository,
     AsyncpgMessageMappingRepository,
+    AsyncpgRosterSyncRepository,
 )
 from xmpp_transport.domain.errors import DuplicateOperation
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
@@ -114,6 +115,33 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("CREATE TABLE backend_bindings", migrations[0].sql)
         self.assertIn("CREATE TABLE message_mappings", migrations[0].sql)
         self.assertIn("CREATE TABLE incoming_message_deliveries", migrations[1].sql)
+
+
+class RosterSyncRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reads_signature(self) -> None:
+        pool = FakePool()
+        pool.value = "signature-1"
+        repository = AsyncpgRosterSyncRepository(pool)
+        result = await repository.signature(
+            BindingId("binding-1"), RemoteObjectId("contact-1")
+        )
+        self.assertEqual("signature-1", result)
+
+    async def test_signature_upsert_is_idempotent_sql(self) -> None:
+        pool = FakePool()
+        repository = AsyncpgRosterSyncRepository(pool)
+        await repository.save_signature(
+            BindingId("binding-1"), RemoteObjectId("contact-1"), "signature-1"
+        )
+        self.assertIn("ON CONFLICT", pool.calls[0][0])
+
+    async def test_delete_is_scoped_by_binding_and_contact(self) -> None:
+        pool = FakePool()
+        repository = AsyncpgRosterSyncRepository(pool)
+        await repository.delete_signature(
+            BindingId("binding-1"), RemoteObjectId("contact-1")
+        )
+        self.assertEqual(("binding-1", "contact-1"), pool.calls[0][1])
 
 
 if __name__ == "__main__":

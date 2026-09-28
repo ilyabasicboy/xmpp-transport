@@ -147,3 +147,52 @@ class AsyncpgMessageMappingRepository:
             str(binding_id),
             str(remote_message_id),
         )
+
+
+class AsyncpgRosterSyncRepository:
+    def __init__(self, pool: DatabasePool) -> None:
+        self._pool = pool
+
+    async def signature(
+        self, binding_id: BindingId, remote_contact_id: RemoteObjectId
+    ) -> Optional[str]:
+        value = await self._pool.fetchval(
+            """
+            SELECT signature
+            FROM roster_sync_records
+            WHERE binding_id = $1 AND remote_contact_id = $2
+            """,
+            str(binding_id),
+            str(remote_contact_id),
+        )
+        return str(value) if value is not None else None
+
+    async def save_signature(
+        self,
+        binding_id: BindingId,
+        remote_contact_id: RemoteObjectId,
+        signature: str,
+    ) -> None:
+        await self._pool.execute(
+            """
+            INSERT INTO roster_sync_records (binding_id, remote_contact_id, signature)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (binding_id, remote_contact_id) DO UPDATE
+            SET signature = EXCLUDED.signature, updated_at = CURRENT_TIMESTAMP
+            """,
+            str(binding_id),
+            str(remote_contact_id),
+            signature,
+        )
+
+    async def delete_signature(
+        self, binding_id: BindingId, remote_contact_id: RemoteObjectId
+    ) -> None:
+        await self._pool.execute(
+            """
+            DELETE FROM roster_sync_records
+            WHERE binding_id = $1 AND remote_contact_id = $2
+            """,
+            str(binding_id),
+            str(remote_contact_id),
+        )

@@ -10,9 +10,11 @@ class XmppMessageSink(Protocol):
 
 
 class XmppRoster(Protocol):
-    async def upsert_contact(self, binding_id: BindingId, contact: Contact) -> None:
+    async def add_contact(self, binding_id: BindingId, contact: Contact) -> None:
+        ...
+
+    async def rename_contact(self, binding_id: BindingId, contact: Contact) -> None:
         ...
 
     async def remove_contact(self, binding_id: BindingId, contact: Contact) -> None:
         ...
-

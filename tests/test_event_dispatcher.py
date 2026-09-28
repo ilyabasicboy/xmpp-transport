@@ -119,6 +119,26 @@ class EventDispatcherTests(unittest.IsolatedAsyncioTestCase):
             await bus.close()
         self.assertEqual("UnhandledEventError", context.exception.failures[0].exception_type)
 
+    async def test_core_factory_registers_contact_sync_handler(self) -> None:
+        contacts = []
+
+        async def receive_message(event):  # type: ignore[no-untyped-def]
+            return None
+
+        async def receive_contact(event):  # type: ignore[no-untyped-def]
+            contacts.append(event.contact.id)
+
+        dispatcher = BackendEventDispatcher.with_core_handlers(
+            receive_message, receive_contact
+        )
+        await dispatcher.handle(
+            ContactChanged(
+                envelope("event-1", ContactChanged.EVENT_TYPE),
+                Contact(RemoteObjectId("contact-1"), "Contact"),
+            )
+        )
+        self.assertEqual([RemoteObjectId("contact-1")], contacts)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,11 @@ class SessionState(str, Enum):
     FAILED = "failed"
 
 
+class ContactChangeKind(str, Enum):
+    UPSERT = "upsert"
+    REMOVED = "removed"
+
+
 @dataclass(frozen=True)
 class EventEnvelope:
     event_id: EventId
@@ -60,6 +65,7 @@ class ContactChanged:
     EVENT_TYPE: ClassVar[str] = "contact.changed"
     envelope: EventEnvelope
     contact: Contact
+    change: ContactChangeKind = ContactChangeKind.UPSERT
 
 
 @dataclass(frozen=True)

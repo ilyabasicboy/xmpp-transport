@@ -55,3 +55,23 @@ class MessageMappingRepository(Protocol):
         self, binding_id: BindingId, remote_message_id: RemoteObjectId
     ) -> None:
         ...
+
+
+class RosterSyncRepository(Protocol):
+    async def signature(
+        self, binding_id: BindingId, remote_contact_id: RemoteObjectId
+    ) -> Optional[str]:
+        ...
+
+    async def save_signature(
+        self,
+        binding_id: BindingId,
+        remote_contact_id: RemoteObjectId,
+        signature: str,
+    ) -> None:
+        ...
+
+    async def delete_signature(
+        self, binding_id: BindingId, remote_contact_id: RemoteObjectId
+    ) -> None:
+        ...

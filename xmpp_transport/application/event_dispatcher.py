@@ -63,3 +63,16 @@ class BackendEventDispatcher:
         dispatcher = cls()
         dispatcher.register(MessageReceived, receive)
         return dispatcher
+
+    @classmethod
+    def with_core_handlers(
+        cls,
+        message_receiver: EventHandler,
+        contact_receiver: EventHandler,
+    ) -> "BackendEventDispatcher":
+        from xmpp_transport.domain.events import ContactChanged, MessageReceived
+
+        dispatcher = cls()
+        dispatcher.register(MessageReceived, message_receiver)
+        dispatcher.register(ContactChanged, contact_receiver)
+        return dispatcher
