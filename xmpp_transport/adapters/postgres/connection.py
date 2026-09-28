@@ -26,6 +26,10 @@ class DatabaseSettings(Protocol):
     def command_timeout(self) -> float:
         ...
 
+    @property
+    def schema(self) -> str:
+        ...
+
 
 async def _asyncpg_pool_factory(**kwargs: object) -> Any:
     import asyncpg
@@ -38,11 +42,13 @@ class PostgresPoolManager:
         self,
         config: DatabaseSettings,
         pool_factory: PoolFactory = _asyncpg_pool_factory,
-        migration_runner_factory: MigrationRunnerFactory = MigrationRunner,
+        migration_runner_factory: Optional[MigrationRunnerFactory] = None,
     ) -> None:
         self._config = config
         self._pool_factory = pool_factory
-        self._migration_runner_factory = migration_runner_factory
+        self._migration_runner_factory = migration_runner_factory or (
+            lambda pool: MigrationRunner(pool, schema=config.schema)
+        )
         self._pool: Optional[Any] = None
         self._closed = False
 
@@ -62,6 +68,7 @@ class PostgresPoolManager:
             min_size=self._config.min_pool_size,
             max_size=self._config.max_pool_size,
             command_timeout=self._config.command_timeout,
+            server_settings={"search_path": self._config.schema},
         )
         try:
             await self._migration_runner_factory(pool).run()

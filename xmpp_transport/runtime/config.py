@@ -20,16 +20,39 @@ class DatabaseConfig:
     min_pool_size: int = 1
     max_pool_size: int = 10
     command_timeout: float = 30.0
+    dsn_env: Optional[str] = None
+    schema: str = "public"
 
     def __post_init__(self) -> None:
-        if not self.dsn.strip():
-            raise ValueError("database DSN must not be empty")
+        if not self.dsn.strip() and not (self.dsn_env and self.dsn_env.strip()):
+            raise ValueError("database dsn or dsn_env must be configured")
+        if self.dsn.strip() and self.dsn_env:
+            raise ValueError("database dsn and dsn_env are mutually exclusive")
+        if not self.schema or not self.schema.replace("_", "a").isalnum():
+            raise ValueError("database schema must be an SQL identifier")
         if self.min_pool_size < 1:
             raise ValueError("database min_pool_size must be positive")
         if self.max_pool_size < self.min_pool_size:
             raise ValueError("database max_pool_size must be at least min_pool_size")
         if self.command_timeout <= 0:
             raise ValueError("database command_timeout must be positive")
+
+    def resolve(self, environment: Mapping[str, str]) -> "DatabaseConfig":
+        if self.dsn:
+            return self
+        assert self.dsn_env is not None
+        value = environment.get(self.dsn_env)
+        if value is None or not value.strip():
+            raise ValueError(
+                "database DSN environment variable is not set: {}".format(self.dsn_env)
+            )
+        return DatabaseConfig(
+            dsn=value,
+            schema=self.schema,
+            min_pool_size=self.min_pool_size,
+            max_pool_size=self.max_pool_size,
+            command_timeout=self.command_timeout,
+        )
 
 
 @dataclass(frozen=True)
@@ -50,6 +73,7 @@ class RuntimeConfig:
     database: Optional[DatabaseConfig] = None
     http: HttpConfig = HttpConfig()
     credential_key_env: str = "XABBER_TRANSPORT_CREDENTIAL_KEY"
+    environment_file: Optional[Path] = None
 
     def credential_key(self, environment: Optional[Mapping[str, str]] = None) -> bytes:
         source = os.environ if environment is None else environment
@@ -64,6 +88,15 @@ class RuntimeConfig:
             return value.encode("ascii")
         except UnicodeEncodeError:
             raise ValueError("credential encryption key must be URL-safe base64") from None
+
+    def resolved_environment(
+        self, environment: Optional[Mapping[str, str]] = None
+    ) -> Mapping[str, str]:
+        result = {}
+        if self.environment_file is not None:
+            result.update(_read_dotenv(self.environment_file))
+        result.update(os.environ if environment is None else environment)
+        return result
 
 
 def load_config(path: Path) -> RuntimeConfig:
@@ -99,6 +132,7 @@ def load_config(path: Path) -> RuntimeConfig:
             port=parser.getint("http", "port", fallback=8080),
         ),
         credential_key_env=key_environment,
+        environment_file=_environment_file(parser, path),
     )
 
 
@@ -111,10 +145,46 @@ def _required(value: Optional[str], section: str) -> str:
 def _database_config(parser: ConfigParser) -> Optional[DatabaseConfig]:
     if not parser.has_section("database"):
         return None
-    dsn = _required(parser.get("database", "dsn", fallback=None), "database")
+    dsn = parser.get("database", "dsn", fallback="").strip()
+    dsn_env = parser.get("database", "dsn_env", fallback=None)
     return DatabaseConfig(
         dsn=dsn,
+        dsn_env=dsn_env.strip() if dsn_env else None,
+        schema=parser.get("database", "schema", fallback="public").strip(),
         min_pool_size=parser.getint("database", "min_pool_size", fallback=1),
         max_pool_size=parser.getint("database", "max_pool_size", fallback=10),
         command_timeout=parser.getfloat("database", "command_timeout", fallback=30.0),
     )
+
+
+def _environment_file(parser: ConfigParser, config_path: Path) -> Optional[Path]:
+    value = parser.get("environment", "file", fallback="").strip()
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = config_path.parent / path
+    return path.resolve()
+
+
+def _read_dotenv(path: Path) -> Mapping[str, str]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ValueError("environment file cannot be read: {}".format(path)) from exc
+    values = {}
+    for number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or not key.replace("_", "a").isalnum() or key[0].isdigit():
+            raise ValueError("invalid environment assignment at {}:{}".format(path, number))
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        values[key] = value
+    return values

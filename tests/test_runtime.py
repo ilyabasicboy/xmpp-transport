@@ -72,6 +72,18 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             DatabaseConfig("postgresql://db/transport", min_pool_size=3, max_pool_size=2)
 
+    def test_database_dsn_can_be_resolved_from_environment(self) -> None:
+        unresolved = DatabaseConfig("", dsn_env="DATABASE_URL", schema="transport")
+        resolved = unresolved.resolve({"DATABASE_URL": "postgresql://private"})
+        self.assertEqual("postgresql://private", resolved.dsn)
+        self.assertEqual("transport", resolved.schema)
+        self.assertNotIn("private", repr(resolved))
+
+    def test_database_dsn_environment_is_required(self) -> None:
+        unresolved = DatabaseConfig("", dsn_env="DATABASE_URL")
+        with self.assertRaisesRegex(ValueError, "DATABASE_URL"):
+            unresolved.resolve({})
+
     def test_reads_http_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "transport.ini"
@@ -86,6 +98,30 @@ class ConfigTests(unittest.TestCase):
     def test_http_port_is_validated(self) -> None:
         with self.assertRaises(ValueError):
             HttpConfig(port=0)
+
+    def test_dotenv_is_parsed_as_data_and_process_environment_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dotenv = root / ".env"
+            dotenv.write_text(
+                "DATABASE_URL=postgresql://from-file\n"
+                "CRON=0 3 * * *\n"
+                "QUOTED='value with spaces'\n",
+                encoding="utf-8",
+            )
+            config_path = root / "transport.ini"
+            config_path.write_text(
+                "[environment]\nfile=.env\n"
+                "[backend:fake]\ncomponent_domain=fake.example.com\n",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            environment = config.resolved_environment(
+                {"DATABASE_URL": "postgresql://override"}
+            )
+        self.assertEqual("postgresql://override", environment["DATABASE_URL"])
+        self.assertEqual("0 3 * * *", environment["CRON"])
+        self.assertEqual("value with spaces", environment["QUOTED"])
 
 
 class SupervisorTests(unittest.IsolatedAsyncioTestCase):

@@ -222,7 +222,7 @@ def compose_single_backend(
         config=config,
         backend=backend,
         plugin=plugin,
-        database=PostgresPoolManager(config.database),
+        database=PostgresPoolManager(config.database.resolve(source)),
         health=health,
         health_server=AiohttpHealthServer(health, config.http.host, config.http.port),
         wire=SlixmppComponentWire(component),

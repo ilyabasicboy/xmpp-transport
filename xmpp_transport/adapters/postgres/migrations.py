@@ -1,5 +1,6 @@
 """Small transactional migration runner for packaged SQL migrations."""
 
+import re
 from dataclasses import dataclass
 from importlib import resources
 from typing import Any, Iterable, List, Protocol, Sequence
@@ -47,17 +48,27 @@ class MigrationRunner:
     _LOCK_ID = 7276947082477708308
 
     def __init__(
-        self, pool: MigrationPool, migrations: Iterable[Migration] = ()
+        self,
+        pool: MigrationPool,
+        migrations: Iterable[Migration] = (),
+        schema: str = "public",
     ) -> None:
         self._pool = pool
         supplied = list(migrations)
         self._migrations = supplied if supplied else packaged_migrations()
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", schema) is None:
+            raise ValueError("database schema must be an SQL identifier")
+        self._schema = schema
         versions = [item.version for item in self._migrations]
         if len(versions) != len(set(versions)):
             raise ValueError("migration versions must be unique")
 
     async def run(self) -> None:
         async with self._pool.acquire() as connection:
+            await connection.execute(
+                'CREATE SCHEMA IF NOT EXISTS "{}"'.format(self._schema)
+            )
+            await connection.execute('SET search_path TO "{}"'.format(self._schema))
             await connection.execute("SELECT pg_advisory_lock($1)", self._LOCK_ID)
             try:
                 await self._prepare_tracking_table(connection)
@@ -89,4 +100,3 @@ class MigrationRunner:
             )
             """
         )
-

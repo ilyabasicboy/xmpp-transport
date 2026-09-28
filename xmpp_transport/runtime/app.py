@@ -52,6 +52,7 @@ def selected_config(
             database=config.database,
             http=config.http,
             credential_key_env=config.credential_key_env,
+            environment_file=config.environment_file,
         )
     if len(config.backends) != 1:
         raise ValueError("select one backend with --backend")
@@ -131,7 +132,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         plugins = discover_backend_plugins()
         backend = config.backends[0]
         plugin = select_plugin(plugins, backend.name)
-        runtime = compose_single_backend(config, plugin)
+        environment = config.resolved_environment()
+        runtime = compose_single_backend(config, plugin, environment)
         if args.check_config:
             print("configuration valid for backend: {}".format(backend.name))
             return 0
