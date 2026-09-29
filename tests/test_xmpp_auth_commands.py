@@ -56,8 +56,12 @@ class XmppAuthenticationCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (BindingId("binding-1"), BackendId("max")), authentication.begun
         )
-        self.assertIn("https://max.example/qr", response)
-        self.assertIn("/continue", response)
+        self.assertNotIn("https://max.example/qr", response.body)
+        self.assertIn("/continue", response.body)
+        self.assertEqual("image/svg+xml", response.media[0].mime_type)
+        self.assertTrue(
+            response.media[0].data_uri.startswith("data:image/svg+xml;base64,")
+        )
 
     async def test_unknown_command_does_not_start_authentication(self) -> None:
         authentication = Authentication()
@@ -70,7 +74,7 @@ class XmppAuthenticationCommandTests(unittest.IsolatedAsyncioTestCase):
 
         response = await commands.handle("user@example.com", "/status")
 
-        self.assertIn("/login", response)
+        self.assertIn("/login", response.body)
         self.assertIsNone(authentication.begun)
 
     async def test_password_is_submitted_through_control_flow(self) -> None:
@@ -84,5 +88,5 @@ class XmppAuthenticationCommandTests(unittest.IsolatedAsyncioTestCase):
 
         response = await commands.handle("user@example.com", "/password private")
 
-        self.assertEqual("MAX успешно подключён.", response)
+        self.assertEqual("MAX успешно подключён.", response.body)
         self.assertEqual("private", authentication.responses[0][2].secret)

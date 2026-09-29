@@ -10,6 +10,7 @@ from xmpp_transport.domain.models import IncomingMessage
 from xmpp_transport.ports.repositories import BindingRepository
 
 from .addressing import ContactAddressCodec, DirectRouteResolver, InvalidXmppAddress
+from .auth_commands import ControlResponse
 from .message_codec import XmppMessageCodec, XmppMessageError
 
 
@@ -21,7 +22,7 @@ class ControlHandler(Protocol):
     def accepts(self, to_jid: str) -> bool:
         ...
 
-    async def handle(self, from_jid: str, command: str) -> str:
+    async def handle(self, from_jid: str, command: str) -> ControlResponse:
         ...
 
 
@@ -75,10 +76,10 @@ class XmppDirectMessageGateway:
                     if child.tag.rsplit("}", 1)[-1] == "body":
                         body = "".join(child.itertext())
                         break
-                response_text = await self._control.handle(
+                response = await self._control.handle(
                     stanza.attrib.get("from", ""), body
                 )
-                await self._wire.send(self._codec.text_reply(stanza, response_text))
+                await self._wire.send(self._codec.control_reply(stanza, response))
                 return
             route = await self._routes.resolve(
                 stanza.attrib.get("from", ""), stanza.attrib.get("to", "")

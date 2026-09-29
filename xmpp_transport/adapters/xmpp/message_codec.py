@@ -7,14 +7,25 @@ and domain layers.
 
 from datetime import timezone
 from enum import Enum
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from xml.etree import ElementTree as ET
 
 from xmpp_transport.domain.errors import InvalidCommand
 from xmpp_transport.domain.identifiers import BindingId, RemoteObjectId
 from xmpp_transport.domain.models import IncomingMessage, OutgoingMessage, ReplyReference
 
-from .namespaces import CLIENT_NS, DELAY_NS, REPLY_NS, SID_NS, STANZAS_NS
+from .namespaces import (
+    CLIENT_NS,
+    DELAY_NS,
+    FILES_NS,
+    REPLY_NS,
+    SID_NS,
+    STANZAS_NS,
+    XABBER_REFERENCES_NS,
+)
+
+if TYPE_CHECKING:
+    from .auth_commands import ControlResponse
 
 
 class XmppMessageError(str, Enum):
@@ -118,6 +129,31 @@ class XmppMessageCodec:
             attributes["id"] = _bounded_id(request_id, self.MAX_ID_LENGTH)
         response = ET.Element("message", attributes)
         ET.SubElement(response, "body").text = text
+        return response
+
+    def control_reply(self, request: ET.Element, reply: "ControlResponse") -> ET.Element:
+        body = reply.body
+        media_ranges = []
+        for media in reply.media:
+            if body and not body.endswith("\n"):
+                body += "\n"
+            begin = len(body)
+            body += media.name
+            media_ranges.append((media, begin, len(body)))
+        response = self.text_reply(request, body)
+        for media, begin, end in media_ranges:
+            reference = ET.SubElement(
+                response,
+                _tag(XABBER_REFERENCES_NS, "reference"),
+                {"type": "mutable", "begin": str(begin), "end": str(end)},
+            )
+            sharing = ET.SubElement(reference, _tag(FILES_NS, "file-sharing"))
+            file_element = ET.SubElement(sharing, "file")
+            ET.SubElement(file_element, "media-type").text = media.mime_type
+            ET.SubElement(file_element, "name").text = media.name
+            ET.SubElement(file_element, "size").text = str(media.size)
+            sources = ET.SubElement(sharing, "sources")
+            ET.SubElement(sources, "uri").text = media.data_uri
         return response
 
     def _client_message_id(self, element: ET.Element) -> str:

@@ -31,7 +31,9 @@ class SlixmppComponentWire:
         self._settings = settings
         self._handler: Optional[MessageHandler] = None
         self._client: Optional[Any] = None
-        self._ready = asyncio.Event()
+        # asyncio primitives bind to the current loop on Python 3.9. Runtime
+        # composition is synchronous, so create the event lazily in start().
+        self._ready: Optional[asyncio.Event] = None
         self._closed = False
 
     def set_message_handler(self, handler: MessageHandler) -> None:
@@ -46,6 +48,9 @@ class SlixmppComponentWire:
             return
         if self._handler is None:
             raise RuntimeError("XMPP message handler is not configured")
+
+        ready = asyncio.Event()
+        self._ready = ready
 
         from slixmpp import ComponentXMPP
 
@@ -66,7 +71,7 @@ class SlixmppComponentWire:
             if connected is False:
                 raise ConnectionError("XMPP component connection was rejected")
             await asyncio.wait_for(
-                self._ready.wait(), timeout=self._settings.connect_timeout
+                ready.wait(), timeout=self._settings.connect_timeout
             )
         except BaseException:
             self._client = None
@@ -77,7 +82,8 @@ class SlixmppComponentWire:
 
     async def send(self, element: ET.Element) -> None:
         client = self._client
-        if client is None or not self._ready.is_set():
+        ready = self._ready
+        if client is None or ready is None or not ready.is_set():
             raise ConnectionError("XMPP component is not connected")
         client.send_raw(ET.tostring(element, encoding="unicode"))
 
@@ -85,7 +91,9 @@ class SlixmppComponentWire:
         if self._closed:
             return
         self._closed = True
-        self._ready.clear()
+        ready = self._ready
+        if ready is not None:
+            ready.clear()
         client = self._client
         self._client = None
         if client is not None:
@@ -94,10 +102,12 @@ class SlixmppComponentWire:
                 await result
 
     async def _on_session_start(self, event: object) -> None:
-        self._ready.set()
+        if self._ready is not None:
+            self._ready.set()
 
     def _on_disconnected(self, event: object) -> None:
-        self._ready.clear()
+        if self._ready is not None:
+            self._ready.clear()
 
     async def _on_message(self, stanza: Any) -> None:
         if self._handler is not None:
