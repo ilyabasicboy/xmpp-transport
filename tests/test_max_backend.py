@@ -187,6 +187,18 @@ class MaxAuthenticationFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(AuthState.CONNECTED, connected.state)
         self.assertEqual(1, client.closed)
 
+    async def test_rejected_two_factor_password_keeps_flow_active(self) -> None:
+        client = QrClient(password_required=True)
+        flow = MaxAuthenticationFlow(client, PasswordRequired, LoginError)  # type: ignore[arg-type]
+
+        await flow.start()
+        await flow.respond(AuthResponse(AuthResponseKind.CONFIRMATION, "confirmed"))
+        rejected = await flow.respond(AuthResponse(AuthResponseKind.PASSWORD, "wrong"))
+        connected = await flow.respond(AuthResponse(AuthResponseKind.PASSWORD, "correct"))
+
+        self.assertEqual(AuthState.WAITING_PASSWORD, rejected.state)
+        self.assertEqual(AuthState.CONNECTED, connected.state)
+
 
 if __name__ == "__main__":
     unittest.main()

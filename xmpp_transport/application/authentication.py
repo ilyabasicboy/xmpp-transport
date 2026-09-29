@@ -1,14 +1,19 @@
 """Provider-neutral orchestration for short-lived authentication flows."""
 
 import asyncio
+import logging
 from dataclasses import dataclass
-from typing import Dict, Protocol
+from typing import Awaitable, Callable, Dict, Optional, Protocol
 
-from xmpp_transport.domain.auth import AuthChallenge, AuthResponse, AuthState
+from xmpp_transport.domain.auth import AuthChallenge, AuthResponse, AuthResponseKind, AuthState
 from xmpp_transport.domain.errors import InvalidCommand
 from xmpp_transport.domain.identifiers import BackendId, BindingId
 from xmpp_transport.ports.backend import AuthenticationFlow, BackendPluginProvider
 from xmpp_transport.ports.repositories import BindingRepository, CredentialCipher
+
+
+log = logging.getLogger(__name__)
+ChallengeHandler = Callable[[BindingId, AuthChallenge], Awaitable[None]]
 
 
 class SessionStarter(Protocol):
@@ -34,17 +39,23 @@ class AuthenticationCoordinator:
         bindings: BindingRepository,
         cipher: CredentialCipher,
         sessions: SessionStarter,
+        challenge_handler: Optional[ChallengeHandler] = None,
     ) -> None:
         self._plugins = plugins
         self._bindings = bindings
         self._cipher = cipher
         self._sessions = sessions
+        self._challenge_handler = challenge_handler
         self._flows: Dict[BindingId, _ManagedFlow] = {}
+        self._tasks: Dict[BindingId, asyncio.Task] = {}
         self._locks: Dict[BindingId, asyncio.Lock] = {}
         self._state_lock = asyncio.Lock()
         self._closed = False
 
     async def begin(self, binding_id: BindingId, backend_id: BackendId) -> AuthChallenge:
+        # A running provider wait may own the binding lock until QR completion.
+        # Cancel it first so a repeated /login replaces the attempt immediately.
+        await self._cancel_task(binding_id)
         lock = await self._lock_for(binding_id)
         async with lock:
             self._ensure_open()
@@ -54,11 +65,17 @@ class AuthenticationCoordinator:
             flow = self._plugins.get(backend_id).create_authentication(binding_id)
             self._flows[binding_id] = _ManagedFlow(backend_id, flow)
             try:
-                return await flow.start()
+                challenge = await flow.start()
             except BaseException:
                 self._flows.pop(binding_id, None)
                 await flow.close()
                 raise
+            if challenge.state is AuthState.WAITING_QR:
+                task = asyncio.create_task(
+                    self._continue_automatically(binding_id, backend_id)
+                )
+                self._tasks[binding_id] = task
+            return challenge
 
     async def respond(
         self,
@@ -92,6 +109,7 @@ class AuthenticationCoordinator:
             return challenge
 
     async def cancel(self, binding_id: BindingId) -> None:
+        await self._cancel_task(binding_id)
         lock = await self._lock_for(binding_id)
         async with lock:
             flow = self._flows.pop(binding_id, None)
@@ -103,9 +121,55 @@ class AuthenticationCoordinator:
             if self._closed:
                 return
             self._closed = True
+            tasks = tuple(self._tasks.values())
+            self._tasks.clear()
             flows = tuple(managed.flow for managed in self._flows.values())
             self._flows.clear()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.gather(*(flow.close() for flow in flows), return_exceptions=True)
+
+    async def _continue_automatically(
+        self, binding_id: BindingId, backend_id: BackendId
+    ) -> None:
+        try:
+            challenge = await self.respond(
+                binding_id,
+                backend_id,
+                AuthResponse(AuthResponseKind.CONFIRMATION, "provider-confirmation"),
+            )
+            if self._challenge_handler is not None:
+                await self._challenge_handler(binding_id, challenge)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.error(
+                "Automatic authentication continuation failed backend_id=%s "
+                "binding_id=%s exception_type=%s",
+                backend_id,
+                binding_id,
+                type(exc).__name__,
+            )
+            if self._challenge_handler is not None:
+                await self._challenge_handler(
+                    binding_id,
+                    AuthChallenge(
+                        AuthState.FAILED,
+                        message="Авторизация завершилась с ошибкой. Повторите /login.",
+                    ),
+                )
+        finally:
+            current = asyncio.current_task()
+            if self._tasks.get(binding_id) is current:
+                self._tasks.pop(binding_id, None)
+
+    async def _cancel_task(self, binding_id: BindingId) -> None:
+        task = self._tasks.pop(binding_id, None)
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     async def _lock_for(self, binding_id: BindingId) -> asyncio.Lock:
         async with self._state_lock:

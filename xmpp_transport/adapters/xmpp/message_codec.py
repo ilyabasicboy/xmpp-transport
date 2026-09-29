@@ -156,6 +156,12 @@ class XmppMessageCodec:
             ET.SubElement(sources, "uri").text = media.data_uri
         return response
 
+    def control_notice(
+        self, from_jid: str, to_jid: str, reply: "ControlResponse"
+    ) -> ET.Element:
+        request = ET.Element("message", {"from": to_jid, "to": from_jid})
+        return self.control_reply(request, reply)
+
     def _client_message_id(self, element: ET.Element) -> str:
         origin = element.find(_tag(SID_NS, "origin-id"))
         origin_id = origin.attrib.get("id") if origin is not None else None

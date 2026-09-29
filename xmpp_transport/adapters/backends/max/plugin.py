@@ -154,6 +154,11 @@ class MaxAuthenticationFlow:
                 message="MAX requires a two-factor authentication password",
             )
         except self._login_error as exc:
+            if response.kind.value == "password":
+                return AuthChallenge(
+                    AuthState.WAITING_PASSWORD,
+                    message="MAX password was not accepted",
+                )
             return AuthChallenge(AuthState.FAILED, message=str(exc))
         token, device_id, account_id = values
         self._credentials = MaxCredentials(token, device_id, account_id)

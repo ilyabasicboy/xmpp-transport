@@ -20,6 +20,7 @@ from xmpp_transport.adapters.xmpp import (
     SlixmppComponentWire,
     XmppDirectMessageGateway,
     XmppAuthenticationCommands,
+    XmppAuthenticationNotices,
     XmppMessageCodec,
     XmppMessageDelivery,
 )
@@ -160,18 +161,26 @@ class SingleBackendRuntime:
 
         event_bus = InMemoryEventBus(dispatcher)
         relay.bind(event_bus)
+        control_localpart = self._backend.options.get("control_localpart", "bot")
+        notices = XmppAuthenticationNotices(
+            "{}@{}".format(control_localpart, self._backend.component_domain),
+            bindings,
+            self._wire,
+            codec,
+        )
         authentication = AuthenticationCoordinator(
             registry,
             bindings,
             self._cipher,
             sessions,
+            challenge_handler=notices.deliver,
         )
         control = XmppAuthenticationCommands(
             self._plugin.backend_id,
             self._backend.component_domain,
             bindings,
             authentication,
-            control_localpart=self._backend.options.get("control_localpart", "bot"),
+            control_localpart=control_localpart,
         )
         gateway = XmppDirectMessageGateway(
             self._wire,

@@ -1,7 +1,7 @@
 """XMPP protocol adapters and XML codecs."""
 
 from .addressing import ContactAddressCodec, DirectRouteResolver, InvalidXmppAddress
-from .auth_commands import XmppAuthenticationCommands
+from .auth_commands import XmppAuthenticationCommands, XmppAuthenticationNotices
 from .component import ComponentSettings, SlixmppComponentWire
 from .gateway import XmppDirectMessageGateway, XmppMessageDelivery
 from .message_codec import XmppMessageCodec, XmppMessageError
@@ -17,4 +17,5 @@ __all__ = [
     "XmppMessageCodec",
     "XmppMessageError",
     "XmppAuthenticationCommands",
+    "XmppAuthenticationNotices",
 ]

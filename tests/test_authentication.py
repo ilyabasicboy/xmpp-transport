@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 from xmpp_transport.application.authentication import AuthenticationCoordinator
@@ -83,16 +84,17 @@ class AuthenticationCoordinatorTests(unittest.IsolatedAsyncioTestCase):
     async def test_encrypts_persists_and_starts_connected_binding(self) -> None:
         binding_id = BindingId("binding-1")
         backend_id = BackendId("max")
+        completed = asyncio.Event()
+
+        async def handle_challenge(_binding_id, _challenge):  # type: ignore[no-untyped-def]
+            completed.set()
+
+        self.coordinator._challenge_handler = handle_challenge
 
         challenge = await self.coordinator.begin(binding_id, backend_id)
-        connected = await self.coordinator.respond(
-            binding_id,
-            backend_id,
-            AuthResponse(AuthResponseKind.CONFIRMATION, "opaque-confirmation"),
-        )
+        await asyncio.wait_for(completed.wait(), timeout=1)
 
         self.assertEqual(AuthState.WAITING_QR, challenge.state)
-        self.assertEqual(AuthState.CONNECTED, connected.state)
         self.assertEqual(
             [(binding_id, backend_id, b"encrypted:private")], self.bindings.saved
         )

@@ -9,8 +9,8 @@ import qrcode
 import qrcode.image.svg
 
 from xmpp_transport.application.authentication import AuthenticationCoordinator
-from xmpp_transport.domain.auth import AuthResponse, AuthResponseKind, AuthState
-from xmpp_transport.domain.identifiers import BackendId
+from xmpp_transport.domain.auth import AuthChallenge, AuthResponse, AuthResponseKind, AuthState
+from xmpp_transport.domain.identifiers import BackendId, BindingId
 from xmpp_transport.ports.repositories import BindingRepository
 
 from .addressing import bare_jid
@@ -56,8 +56,8 @@ class XmppAuthenticationCommands:
         value = command.strip()
         command_name, _, argument = value.partition(" ")
         command_name = command_name.lower()
-        if command_name not in ("/login", "/continue", "/password"):
-            return ControlResponse("Доступные команды: /login, /continue, /password <пароль>")
+        if command_name not in ("/login", "/password"):
+            return ControlResponse("Доступные команды: /login, /password <пароль>")
         owner = bare_jid(from_jid)
         if command_name == "/login":
             binding = await self._bindings.ensure_binding(owner, self._backend_id)
@@ -70,13 +70,7 @@ class XmppAuthenticationCommands:
             )
             if binding is None:
                 raise LookupError("binding is not available for authentication")
-        if command_name == "/continue":
-            challenge = await self._authentication.respond(
-                binding.binding_id,
-                self._backend_id,
-                AuthResponse(AuthResponseKind.CONFIRMATION, "confirmed"),
-            )
-        elif command_name == "/password":
+        if command_name == "/password":
             if not argument:
                 return ControlResponse("Использование: /password <пароль>")
             challenge = await self._authentication.respond(
@@ -89,7 +83,7 @@ class XmppAuthenticationCommands:
                 return ControlResponse("MAX не вернул данные для QR-кода.")
             return ControlResponse(
                 "Отсканируйте QR-код приложением MAX.\n"
-                "После сканирования отправьте /continue.",
+                "После подтверждения transport сообщит о результате здесь.",
                 (_qr_svg(challenge.public_url),),
             )
         if challenge.state is AuthState.WAITING_PASSWORD:
@@ -97,6 +91,36 @@ class XmppAuthenticationCommands:
         if challenge.state is AuthState.CONNECTED:
             return ControlResponse("MAX успешно подключён.")
         return ControlResponse(challenge.message or "Авторизация MAX завершилась с ошибкой.")
+
+
+class XmppAuthenticationNotices:
+    def __init__(
+        self,
+        control_jid: str,
+        bindings: BindingRepository,
+        wire,  # type: ignore[no-untyped-def]
+        codec,  # type: ignore[no-untyped-def]
+    ) -> None:
+        self._control_jid = control_jid
+        self._bindings = bindings
+        self._wire = wire
+        self._codec = codec
+
+    async def deliver(self, binding_id: BindingId, challenge: AuthChallenge) -> None:
+        owner_jid = await self._bindings.xmpp_account_for_binding(binding_id)
+        if owner_jid is None:
+            raise LookupError("active XMPP account not found for binding")
+        if challenge.state is AuthState.WAITING_PASSWORD:
+            body = "MAX запросил пароль 2FA. Отправьте /password <пароль>."
+        elif challenge.state is AuthState.CONNECTED:
+            body = "MAX успешно подключён."
+        else:
+            body = challenge.message or "Авторизация MAX завершилась с ошибкой."
+        await self._wire.send(
+            self._codec.control_notice(
+                self._control_jid, owner_jid, ControlResponse(body)
+            )
+        )
 
 
 def _qr_svg(value: str) -> ControlMedia:
