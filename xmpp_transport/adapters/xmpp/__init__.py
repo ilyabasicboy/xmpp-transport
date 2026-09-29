@@ -5,6 +5,7 @@ from .auth_commands import XmppAuthenticationCommands, XmppAuthenticationNotices
 from .component import ComponentSettings, SlixmppComponentWire
 from .gateway import XmppDirectMessageGateway, XmppMessageDelivery
 from .message_codec import XmppMessageCodec, XmppMessageError
+from .roster import XmppServerRoster
 
 __all__ = [
     "ContactAddressCodec",
@@ -16,6 +17,7 @@ __all__ = [
     "XmppMessageDelivery",
     "XmppMessageCodec",
     "XmppMessageError",
+    "XmppServerRoster",
     "XmppAuthenticationCommands",
     "XmppAuthenticationNotices",
 ]

@@ -87,6 +87,26 @@ class SlixmppComponentWire:
             raise ConnectionError("XMPP component is not connected")
         client.send_raw(ET.tostring(element, encoding="unicode"))
 
+    async def request(self, element: ET.Element, timeout: float = 10.0) -> ET.Element:
+        if element.tag.rsplit("}", 1)[-1] != "iq":
+            raise ValueError("XMPP request must be an IQ stanza")
+        client = self._client
+        ready = self._ready
+        if client is None or ready is None or not ready.is_set():
+            raise ConnectionError("XMPP component is not connected")
+        children = tuple(element)
+        if len(children) != 1:
+            raise ValueError("XMPP IQ request must contain one payload element")
+        iq = client.make_iq_set(
+            sub=children[0],
+            ito=element.attrib.get("to"),
+            ifrom=element.attrib.get("from"),
+        )
+        if element.attrib.get("id"):
+            iq["id"] = element.attrib["id"]
+        response = await iq.send(timeout=timeout)
+        return response.xml
+
     async def close(self) -> None:
         if self._closed:
             return

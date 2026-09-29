@@ -7,24 +7,31 @@ wire details do not leak into the application and domain packages.
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Mapping, Optional, Protocol, Tuple, Type
+from typing import Callable, Mapping, Optional, Protocol, Sequence, Tuple, Type
 from uuid import uuid4
 
 from xmpp_transport.domain.auth import AuthChallenge, AuthResponse, AuthState
 from xmpp_transport.domain.errors import BackendUnavailable, FeatureUnavailable, InvalidCommand
 from xmpp_transport.domain.events import (
     AuthorizationLost,
+    ContactChanged,
     EventEnvelope,
     MessageReceived,
     SessionState,
     SessionStateChanged,
 )
 from xmpp_transport.domain.identifiers import BackendId, BindingId, EventId, RemoteObjectId
-from xmpp_transport.domain.models import IncomingMessage, OutgoingMessage, ReplyReference
-from xmpp_transport.ports.backend import MessageSender, SendResult
+from xmpp_transport.domain.models import (
+    Avatar,
+    Contact,
+    IncomingMessage,
+    OutgoingMessage,
+    ReplyReference,
+)
+from xmpp_transport.ports.backend import ContactSource, MessageSender, SendResult
 from xmpp_transport.ports.events import BackendEventSink
 
-from .models import MaxAuthorizationError, MaxIncomingMessage
+from .models import MaxAuthorizationError, MaxChat, MaxContact, MaxIncomingMessage
 
 
 class MaxClient(Protocol):
@@ -34,6 +41,9 @@ class MaxClient(Protocol):
     def set_authorization_lost_handler(
         self, handler: Callable[[MaxAuthorizationError], object]
     ) -> None:
+        ...
+
+    def set_chat_handler(self, handler: Callable[[MaxChat], object]) -> None:
         ...
 
     async def start(self) -> None:
@@ -48,6 +58,9 @@ class MaxClient(Protocol):
         chat_id: Optional[str] = None,
         reply_to_message_id: Optional[str] = None,
     ) -> dict:
+        ...
+
+    async def list_contacts(self) -> list[MaxContact]:
         ...
 
 
@@ -202,6 +215,7 @@ class MaxBackendSession:
             return
         self._client.set_message_handler(self._receive_message)
         self._client.set_authorization_lost_handler(self._authorization_lost)
+        self._client.set_chat_handler(self._receive_chat)
         await self._publish_state(SessionState.STARTING)
         try:
             await self._client.start()
@@ -220,7 +234,11 @@ class MaxBackendSession:
         await self._publish_state(SessionState.STOPPED)
 
     def features(self) -> Mapping[type, object]:
-        return {MessageSender: self}
+        return {MessageSender: self, ContactSource: self}
+
+    async def contacts(self) -> Sequence[Contact]:
+        contacts = await self._client.list_contacts()
+        return tuple(self._contact(item) for item in contacts)
 
     async def send_message(self, message: OutgoingMessage) -> SendResult:
         if not self._started or self._closed:
@@ -271,6 +289,36 @@ class MaxBackendSession:
                     },
                 ),
             )
+        )
+
+    async def _receive_chat(self, chat: MaxChat) -> None:
+        if chat.is_group:
+            return
+        await self._event_sink.publish(
+            ContactChanged(
+                envelope=self._envelope(ContactChanged.EVENT_TYPE),
+                contact=Contact(
+                    id=RemoteObjectId(chat.chat_id),
+                    display_name=chat.title,
+                    avatar=(
+                        Avatar(chat.avatar.url, chat.avatar.avatar_id)
+                        if chat.avatar is not None
+                        else None
+                    ),
+                ),
+            )
+        )
+
+    @staticmethod
+    def _contact(contact: MaxContact) -> Contact:
+        return Contact(
+            id=RemoteObjectId(contact.chat_id),
+            display_name=contact.title,
+            avatar=(
+                Avatar(contact.avatar.url, contact.avatar.avatar_id)
+                if contact.avatar is not None
+                else None
+            ),
         )
 
     async def _authorization_lost(self, exc: MaxAuthorizationError) -> None:

@@ -7,12 +7,22 @@ from xmpp_transport.adapters.backends.max import (
     MaxBackendPlugin,
     MaxCredentials,
 )
-from xmpp_transport.adapters.backends.max.models import MaxAuthorizationError, MaxIncomingMessage
+from xmpp_transport.adapters.backends.max.models import (
+    MaxAuthorizationError,
+    MaxChat,
+    MaxContact,
+    MaxIncomingMessage,
+)
 from xmpp_transport.domain.auth import AuthResponse, AuthResponseKind, AuthState
-from xmpp_transport.domain.events import AuthorizationLost, MessageReceived, SessionStateChanged
+from xmpp_transport.domain.events import (
+    AuthorizationLost,
+    ContactChanged,
+    MessageReceived,
+    SessionStateChanged,
+)
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
 from xmpp_transport.domain.models import OutgoingMessage
-from xmpp_transport.ports.backend import MessageSender
+from xmpp_transport.ports.backend import ContactSource, MessageSender
 
 
 class EventSink:
@@ -27,6 +37,7 @@ class MaxClient:
     def __init__(self) -> None:
         self.message_handler = None
         self.authorization_lost_handler = None
+        self.chat_handler = None
         self.started = 0
         self.closed = 0
         self.sent = []
@@ -37,6 +48,9 @@ class MaxClient:
     def set_authorization_lost_handler(self, handler) -> None:  # type: ignore[no-untyped-def]
         self.authorization_lost_handler = handler
 
+    def set_chat_handler(self, handler) -> None:  # type: ignore[no-untyped-def]
+        self.chat_handler = handler
+
     async def start(self) -> None:
         self.started += 1
 
@@ -46,6 +60,9 @@ class MaxClient:
     async def send_message(self, text, chat_id=None, reply_to_message_id=None):  # type: ignore[no-untyped-def]
         self.sent.append((text, chat_id, reply_to_message_id))
         return {"message": {"id": "sent-1"}}
+
+    async def list_contacts(self):  # type: ignore[no-untyped-def]
+        return [MaxContact("user-1", "Alice", "chat-1")]
 
 
 class LoginError(RuntimeError):
@@ -156,6 +173,23 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("incoming", messages[0].message.text)
         self.assertEqual(RemoteObjectId("chat-1"), messages[0].message.conversation_id)
         self.assertEqual("expired", lost[0].reason)
+
+    async def test_publishes_direct_snapshot_chat_as_roster_contact(self) -> None:
+        await self.session.start()
+
+        await self.client.chat_handler(MaxChat("chat-42", "Alice"))  # type: ignore[misc]
+
+        contacts = [event for event in self.sink.events if isinstance(event, ContactChanged)]
+        self.assertEqual(RemoteObjectId("chat-42"), contacts[0].contact.id)
+        self.assertEqual("Alice", contacts[0].contact.display_name)
+
+    async def test_exposes_address_book_through_contact_source(self) -> None:
+        await self.session.start()
+
+        source = self.session.features()[ContactSource]
+        contacts = await source.contacts()  # type: ignore[attr-defined]
+
+        self.assertEqual(RemoteObjectId("chat-1"), contacts[0].id)
 
 
 class MaxAuthenticationFlowTests(unittest.IsolatedAsyncioTestCase):

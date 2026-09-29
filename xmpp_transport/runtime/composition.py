@@ -23,6 +23,7 @@ from xmpp_transport.adapters.xmpp import (
     XmppAuthenticationNotices,
     XmppMessageCodec,
     XmppMessageDelivery,
+    XmppServerRoster,
 )
 from xmpp_transport.application import (
     AuthenticationCoordinator,
@@ -153,11 +154,22 @@ class SingleBackendRuntime:
         dispatcher.register(SessionStateChanged, self._observe_session_state)
         dispatcher.register(MessageChanged, self._unsupported_event)
         dispatcher.register(ConversationChanged, self._unsupported_event)
-        if self._roster is None:
-            dispatcher.register(ContactChanged, self._unsupported_event)
-        else:
-            roster_sync = RosterSync(AsyncpgRosterSyncRepository(pool), self._roster)
-            dispatcher.register(ContactChanged, roster_sync.handle)
+        roster = self._roster or XmppServerRoster(
+            self._wire,
+            bindings,
+            addresses,
+            self._backend.component_domain,
+            self._backend.options.get(
+                "server_domain", _server_domain(self._backend.component_domain)
+            ),
+            self._backend.options.get(
+                "roster_namespace",
+                "urn:xabber:transport:{}:1".format(self._backend.name),
+            ),
+            (self._backend.options.get("roster_group", self._backend.name.upper()),),
+        )
+        roster_sync = RosterSync(AsyncpgRosterSyncRepository(pool), roster)
+        dispatcher.register(ContactChanged, roster_sync.handle)
 
         event_bus = InMemoryEventBus(dispatcher)
         relay.bind(event_bus)
@@ -278,6 +290,11 @@ def _positive_int(value: str, name: str) -> int:
     if parsed <= 0:
         raise ValueError("{} must be positive".format(name))
     return parsed
+
+
+def _server_domain(component_domain: str) -> str:
+    _prefix, separator, server_domain = component_domain.partition(".")
+    return server_domain if separator else component_domain
 
 
 def _positive_float(value: str, name: str) -> float:
