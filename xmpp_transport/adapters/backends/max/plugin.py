@@ -276,6 +276,19 @@ class MaxBackendSession:
             not message.is_group or not self._test_self_messages
         ):
             return
+        if message.is_group and not message.is_self:
+            direct_chat_id = self._member_direct_chat_id(message.sender_id)
+            if direct_chat_id is not None:
+                await self._event_sink.publish(
+                    ContactChanged(
+                        envelope=self._envelope(ContactChanged.EVENT_TYPE),
+                        contact=Contact(
+                            id=RemoteObjectId(direct_chat_id),
+                            display_name=message.sender_title
+                            or "MAX user {}".format(message.sender_id),
+                        ),
+                    )
+                )
         reply = (
             ReplyReference(RemoteObjectId(message.reply_to_message_id))
             if message.reply_to_message_id
@@ -297,6 +310,7 @@ class MaxBackendSession:
                         "is_self": "true" if message.is_self else "false",
                         "sender_title": message.sender_title or "",
                         "chat_title": message.chat_title or "",
+                        "owner_remote_id": self._credentials.account_id,
                     },
                 ),
             )

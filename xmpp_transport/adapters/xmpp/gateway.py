@@ -138,6 +138,7 @@ class XmppMessageDelivery:
         control_jid: Optional[str] = None,
         transport_namespace: Optional[str] = None,
         group_localpart_prefix: Optional[str] = None,
+        member_fallback_prefix: Optional[str] = None,
     ) -> None:
         self._wire = wire
         self._addresses = addresses
@@ -147,24 +148,23 @@ class XmppMessageDelivery:
         self._control_jid = control_jid
         self._transport_namespace = transport_namespace
         self._group_localpart_prefix = group_localpart_prefix
+        self._member_fallback_prefix = member_fallback_prefix
 
     async def deliver_message(self, message: IncomingMessage) -> None:
         owner_jid = await self._bindings.xmpp_account_for_binding(message.binding_id)
         if owner_jid is None:
             raise LookupError("active XMPP account not found for binding")
-        if (
-            message.attributes.get("is_group") == "true"
-            and message.attributes.get("is_self") == "true"
-        ):
+        if message.attributes.get("is_group") == "true":
             if not all(
                 (
                     self._server_domain,
                     self._control_jid,
                     self._transport_namespace,
                     self._group_localpart_prefix,
+                    self._member_fallback_prefix,
                 )
             ):
-                raise LookupError("group self-message delivery is not configured")
+                raise LookupError("group message delivery is not configured")
             token = "".join(
                 character
                 for character in str(message.conversation_id)
@@ -176,14 +176,36 @@ class XmppMessageDelivery:
                 token,
                 self._server_domain,
             )
-            stanza = self._codec.serialize_group_self(
+            is_self = message.attributes.get("is_self") == "true"
+            sender_jid = (
+                self._control_jid
+                if is_self
+                else self._group_member_jid(message)
+            )
+            stanza = self._codec.serialize_group_message(
                 message,
-                self._control_jid,
+                sender_jid,
                 group_jid,
                 self._transport_namespace,
+                fake_outgoing=is_self,
             )
             await self._wire.send(stanza)
             return
         sender_jid = self._addresses.contact_jid(message.conversation_id)
         stanza = self._codec.serialize_incoming(message, sender_jid, owner_jid)
         await self._wire.send(stanza)
+
+    def _group_member_jid(self, message: IncomingMessage) -> str:
+        owner_remote_id = message.attributes.get("owner_remote_id", "")
+        try:
+            localpart = "chat-{}".format(
+                int(owner_remote_id) ^ int(str(message.sender_id))
+            )
+        except (TypeError, ValueError):
+            safe = "".join(
+                character
+                for character in str(message.sender_id)
+                if character.isalnum() or character in "-_"
+            ) or "unknown"
+            localpart = "{}-user-{}".format(self._member_fallback_prefix, safe)
+        return "{}@{}".format(localpart, self._addresses.component_domain)

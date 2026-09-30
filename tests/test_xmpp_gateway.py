@@ -218,6 +218,7 @@ class XmppGatewayTests(unittest.IsolatedAsyncioTestCase):
             control_jid="bot@max.example.com",
             transport_namespace="urn:xabber:transport:max:1",
             group_localpart_prefix="maxg",
+            member_fallback_prefix="max",
         )
         message = IncomingMessage(
             id=RemoteObjectId("group-message-1"),
@@ -241,6 +242,45 @@ class XmppGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(
             stanza.find("{urn:xabber:transport:max:1}fake-outgoing")
         )
+
+    async def test_delivers_group_message_from_virtual_member_contact(self) -> None:
+        from xmpp_transport.adapters.xmpp.gateway import XmppMessageDelivery
+
+        sink = XmppMessageDelivery(
+            self.wire,
+            ContactAddressCodec("max.example.com"),
+            self.bindings,
+            XmppMessageCodec(),
+            server_domain="example.com",
+            control_jid="bot@max.example.com",
+            transport_namespace="urn:xabber:transport:max:1",
+            group_localpart_prefix="maxg",
+            member_fallback_prefix="max",
+        )
+        message = IncomingMessage(
+            id=RemoteObjectId("group-message-2"),
+            binding_id=BindingId("binding-1"),
+            conversation_id=RemoteObjectId("888"),
+            sender_id=RemoteObjectId("7"),
+            occurred_at=datetime.now(timezone.utc),
+            text="Incoming from member",
+            attributes={
+                "is_group": "true",
+                "is_self": "false",
+                "owner_remote_id": "100",
+            },
+        )
+
+        await sink.deliver_message(message)
+
+        stanza = self.wire.sent[0]
+        self.assertEqual("chat-99@max.example.com", stanza.attrib["from"])
+        self.assertEqual(
+            "maxg-75736572406578616d706c652e636f6d-888@example.com",
+            stanza.attrib["to"],
+        )
+        self.assertIsNotNone(stanza.find("{{{}}}markable".format(CHAT_MARKERS_NS)))
+        self.assertIsNone(stanza.find("{urn:xabber:transport:max:1}fake-outgoing"))
 
 
 class ComponentSettingsTests(unittest.TestCase):

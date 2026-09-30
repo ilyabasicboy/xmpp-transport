@@ -164,6 +164,7 @@ class SingleBackendRuntime:
             control_jid="{}@{}".format(control_localpart, self._backend.component_domain),
             transport_namespace=roster_namespace,
             group_localpart_prefix="{}g".format(self._backend.name),
+            member_fallback_prefix=self._backend.name,
         )
         messages = MessageRouter(sessions, mappings, delivery)
         routes = DirectRouteResolver(self._plugin.backend_id, addresses, bindings)

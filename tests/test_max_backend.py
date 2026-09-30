@@ -253,6 +253,39 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
             any(isinstance(event, MessageReceived) for event in self.sink.events)
         )
 
+    async def test_group_message_syncs_sender_before_publishing_message(self) -> None:
+        plugin = MaxBackendPlugin(lambda credentials: self.client)  # type: ignore[arg-type]
+        session = plugin.create_session(
+            BindingId("binding-1"),
+            MaxCredentials("token", "device", "100").encode(),
+            self.sink,  # type: ignore[arg-type]
+        )
+        await session.start()
+
+        await self.client.message_handler(  # type: ignore[misc]
+            MaxIncomingMessage(
+                sender_id="7",
+                sender_title="Alice",
+                text="group incoming",
+                chat_id="888",
+                chat_title="MAX Group",
+                message_id="group-message-1",
+                is_group=True,
+            )
+        )
+
+        relevant = [
+            event
+            for event in self.sink.events
+            if isinstance(event, (ContactChanged, MessageReceived))
+        ]
+        self.assertIsInstance(relevant[0], ContactChanged)
+        self.assertEqual(RemoteObjectId("99"), relevant[0].contact.id)
+        self.assertIsInstance(relevant[1], MessageReceived)
+        self.assertEqual(
+            "100", relevant[1].message.attributes["owner_remote_id"]
+        )
+
     async def test_publishes_direct_snapshot_chat_as_roster_contact(self) -> None:
         await self.session.start()
 

@@ -97,20 +97,23 @@ class XmppMessageCodec:
         ET.SubElement(element, _tag(DELAY_NS, "delay"), {"stamp": stamp})
         return element
 
-    def serialize_group_self(
+    def serialize_group_message(
         self,
         message: IncomingMessage,
         from_jid: str,
         group_jid: str,
-        transport_namespace: str,
+        transport_namespace: Optional[str] = None,
+        fake_outgoing: bool = False,
     ) -> ET.Element:
-        """Render a MAX-authored group message as Xabber fake outgoing traffic."""
+        """Render an incoming provider message through the Xabber group protocol."""
         element = self.serialize_incoming(message, from_jid, group_jid)
         message_id = element.attrib["id"]
         ET.SubElement(element, _tag(CHAT_MARKERS_NS, "markable"))
-        # The transport marker prevents the component from sending its own synthetic
-        # outgoing stanza back to the provider.
-        ET.SubElement(element, _tag(transport_namespace, "fake-outgoing"))
+        if fake_outgoing:
+            if not transport_namespace:
+                raise ValueError("transport namespace is required for fake outgoing")
+            # Prevent a synthetic self-message from being sent back to the provider.
+            ET.SubElement(element, _tag(transport_namespace, "fake-outgoing"))
         origin = element.find(_tag(SID_NS, "origin-id"))
         if origin is None:
             ET.SubElement(element, _tag(SID_NS, "origin-id"), {"id": message_id})
