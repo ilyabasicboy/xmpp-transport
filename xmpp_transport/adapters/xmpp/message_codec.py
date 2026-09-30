@@ -16,6 +16,7 @@ from xmpp_transport.domain.models import IncomingMessage, OutgoingMessage, Reply
 
 from .namespaces import (
     CLIENT_NS,
+    COMPONENT_ACCEPT_NS,
     DELAY_NS,
     FILES_NS,
     REPLY_NS,
@@ -173,7 +174,11 @@ class XmppMessageCodec:
     def _body(self, element: ET.Element) -> str:
         body_element = None
         for child in element:
-            if _local_name(child.tag) == "body" and _namespace(child.tag) in ("", CLIENT_NS):
+            if _local_name(child.tag) == "body" and _namespace(child.tag) in (
+                "",
+                CLIENT_NS,
+                COMPONENT_ACCEPT_NS,
+            ):
                 body_element = child
                 break
         body = "" if body_element is None else "".join(body_element.itertext())

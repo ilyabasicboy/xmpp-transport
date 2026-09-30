@@ -34,6 +34,23 @@ class ParseOutgoingTests(unittest.TestCase):
         self.assertEqual("client-stable-id", message.client_message_id)
         self.assertEqual("Hello", message.text)
 
+    def test_parses_body_from_component_accept_stanza(self) -> None:
+        stanza = ET.fromstring(
+            """
+            <message xmlns='jabber:component:accept'
+                     from='user@example.com/device'
+                     to='chat-123@max.example.com'
+                     type='chat' id='client-component-1'>
+              <body>Hello from Xabber</body>
+            </message>
+            """
+        )
+        message = self.codec.parse_outgoing(
+            stanza, self.binding_id, self.conversation_id
+        )
+        self.assertEqual("client-component-1", message.client_message_id)
+        self.assertEqual("Hello from Xabber", message.text)
+
     def test_parses_standard_reply_reference(self) -> None:
         stanza = ET.fromstring(
             """
