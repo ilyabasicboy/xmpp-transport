@@ -57,6 +57,7 @@ class Conversation:
     title: str
     participants: Sequence[Participant] = field(default_factory=tuple)
     avatar: Optional[Avatar] = None
+    attributes: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -107,4 +108,3 @@ class OutgoingMessage:
             raise ValueError("client_message_id must not be empty")
         if not self.text and not self.media:
             raise ValueError("an outgoing message must contain text or media")
-

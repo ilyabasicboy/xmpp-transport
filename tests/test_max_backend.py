@@ -286,9 +286,35 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(conversations))
         self.assertEqual("MAX Group", conversations[0].conversation.title)
         self.assertEqual("Alice", conversations[0].conversation.participants[0].display_name)
-        self.assertFalse(
-            any(isinstance(event, ContactChanged) for event in self.sink.events)
+        self.assertEqual(
+            "account",
+            conversations[0].conversation.attributes["owner_remote_id"],
         )
+        # Non-numeric fixture IDs cannot be mapped through MAX's XOR dialog rule.
+        self.assertFalse(any(isinstance(event, ContactChanged) for event in self.sink.events))
+
+    async def test_syncs_numeric_group_member_as_direct_roster_contact(self) -> None:
+        from xmpp_transport.adapters.backends.max.models import MaxChatMember
+
+        plugin = MaxBackendPlugin(lambda credentials: self.client)  # type: ignore[arg-type]
+        session = plugin.create_session(
+            BindingId("binding-1"),
+            MaxCredentials("token", "device", "100").encode(),
+            self.sink,  # type: ignore[arg-type]
+        )
+        await session.start()
+        await self.client.chat_handler(  # type: ignore[misc]
+            MaxChat(
+                "group-42",
+                "MAX Group",
+                is_group=True,
+                members=(MaxChatMember("7", "Alice"),),
+            )
+        )
+
+        contacts = [event for event in self.sink.events if isinstance(event, ContactChanged)]
+        self.assertEqual(RemoteObjectId(str(100 ^ 7)), contacts[0].contact.id)
+        self.assertEqual("Alice", contacts[0].contact.display_name)
 
     async def test_exposes_address_book_through_contact_source(self) -> None:
         await self.session.start()

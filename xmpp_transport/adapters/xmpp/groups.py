@@ -1,19 +1,27 @@
 """Xabber Groups protocol adapter for transport-owned conversations."""
 
+from typing import Protocol
 from xml.etree import ElementTree as ET
 
 from xmpp_transport.domain.identifiers import BindingId
 from xmpp_transport.domain.models import Conversation
 from xmpp_transport.ports.repositories import BindingRepository
 
-from .namespaces import GROUPS_NS, STANZAS_NS
-from .roster import IqWire
+from .namespaces import GROUPS_NS, NICK_NS, STANZAS_NS
+
+
+class GroupWire(Protocol):
+    async def request(self, element: ET.Element, timeout: float = 10.0) -> ET.Element:
+        ...
+
+    async def send(self, element: ET.Element) -> None:
+        ...
 
 
 class XmppGroupManager:
     def __init__(
         self,
-        wire: IqWire,
+        wire: GroupWire,
         bindings: BindingRepository,
         component_domain: str,
         server_domain: str,
@@ -28,6 +36,7 @@ class XmppGroupManager:
         self._control_jid = "{}@{}".format(control_localpart, component_domain)
         self._group_localpart_prefix = group_localpart_prefix
         self._provider_label = provider_label
+        self._ensured_members = set()
 
     async def ensure_group(
         self, binding_id: BindingId, conversation: Conversation
@@ -56,6 +65,89 @@ class XmppGroupManager:
         update = ET.Element("{{{}}}info".format(GROUPS_NS))
         ET.SubElement(update, "name").text = conversation.title
         await self._request(group_jid, update)
+        await self._ensure_member(
+            owner_jid,
+            group_jid,
+            self._control_jid,
+            "{} Transport".format(self._provider_label),
+            auto_join=True,
+        )
+        await self._ensure_member(
+            owner_jid,
+            group_jid,
+            owner_jid,
+            owner_jid.split("@", 1)[0],
+            auto_join=False,
+            send_invite=True,
+        )
+        owner_remote_id = conversation.attributes.get("owner_remote_id")
+        for participant in conversation.participants:
+            if owner_remote_id and str(participant.id) == owner_remote_id:
+                continue
+            member_jid = self._member_jid(owner_remote_id, str(participant.id))
+            await self._ensure_member(
+                owner_jid,
+                group_jid,
+                member_jid,
+                participant.display_name
+                or "{} user {}".format(self._provider_label, participant.id),
+                auto_join=True,
+            )
+
+    async def _ensure_member(
+        self,
+        owner_jid: str,
+        group_jid: str,
+        member_jid: str,
+        nickname: str,
+        *,
+        auto_join: bool,
+        send_invite: bool = False,
+    ) -> None:
+        key = (owner_jid, group_jid, member_jid)
+        if key in self._ensured_members:
+            return
+        invite = ET.Element("{{{}}}invite".format(GROUPS_NS))
+        ET.SubElement(invite, "jid").text = member_jid
+        ET.SubElement(invite, "send").text = "true" if send_invite else "false"
+        ET.SubElement(invite, "reason").text = "{} group member".format(
+            self._provider_label
+        )
+        invited = True
+        try:
+            await self._request(group_jid, invite)
+        except Exception:
+            invited = False
+        if not auto_join:
+            if invited:
+                self._ensured_members.add(key)
+            return
+        subscribe = ET.Element(
+            "presence",
+            {"from": member_jid, "to": group_jid, "type": "subscribe"},
+        )
+        ET.SubElement(subscribe, "{{{}}}nick".format(NICK_NS)).text = nickname
+        await self._wire.send(subscribe)
+        subscribed = ET.Element(
+            "presence",
+            {"from": member_jid, "to": group_jid, "type": "subscribed"},
+        )
+        await self._wire.send(subscribed)
+        self._ensured_members.add(key)
+
+    def _member_jid(self, owner_remote_id: str, member_remote_id: str) -> str:
+        try:
+            localpart = "chat-{}".format(
+                int(owner_remote_id) ^ int(member_remote_id)
+            )
+        except (TypeError, ValueError):
+            safe = "".join(
+                character
+                for character in member_remote_id
+                if character.isalnum() or character in "-_"
+            ) or "unknown"
+            localpart = "{}-user-{}".format(self._provider_label.lower(), safe)
+        return "{}@{}".format(localpart, self._component_domain)
 
     async def _request(self, recipient: str, payload: ET.Element) -> ET.Element:
         iq = ET.Element(

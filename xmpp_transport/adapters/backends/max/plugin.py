@@ -304,6 +304,26 @@ class MaxBackendSession:
 
     async def _receive_chat(self, chat: MaxChat) -> None:
         if chat.is_group:
+            for member in chat.members:
+                if member.user_id == self._credentials.account_id:
+                    continue
+                direct_chat_id = self._member_direct_chat_id(member.user_id)
+                if direct_chat_id is None:
+                    continue
+                await self._event_sink.publish(
+                    ContactChanged(
+                        envelope=self._envelope(ContactChanged.EVENT_TYPE),
+                        contact=Contact(
+                            id=RemoteObjectId(direct_chat_id),
+                            display_name=member.title,
+                            avatar=(
+                                Avatar(member.avatar.url, member.avatar.avatar_id)
+                                if member.avatar is not None
+                                else None
+                            ),
+                        ),
+                    )
+                )
             await self._event_sink.publish(
                 ConversationChanged(
                     envelope=self._envelope(ConversationChanged.EVENT_TYPE),
@@ -323,6 +343,7 @@ class MaxBackendSession:
                             if chat.avatar is not None
                             else None
                         ),
+                        attributes={"owner_remote_id": self._credentials.account_id},
                     ),
                 )
             )
@@ -354,6 +375,12 @@ class MaxBackendSession:
                 else None
             ),
         )
+
+    def _member_direct_chat_id(self, member_user_id: str) -> Optional[str]:
+        try:
+            return str(int(self._credentials.account_id) ^ int(member_user_id))
+        except (TypeError, ValueError):
+            return None
 
     async def _authorization_lost(self, exc: MaxAuthorizationError) -> None:
         self._started = False
