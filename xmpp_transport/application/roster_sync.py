@@ -49,9 +49,9 @@ class RosterSync:
             return RosterSyncResult.REMOVED
 
         desired = contact_signature(contact)
-        if current == desired:
+        if not event.force and current == desired:
             return RosterSyncResult.UNCHANGED
-        if current is None:
+        if current is None or event.force:
             await self._xmpp.add_contact(binding_id, contact)
             result = RosterSyncResult.ADDED
         else:

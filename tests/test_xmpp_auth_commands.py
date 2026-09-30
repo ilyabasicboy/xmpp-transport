@@ -24,7 +24,7 @@ class Bindings:
         self.lookup = (bare_jid, backend_id)
         return self.record
 
-    async def xmpp_account_for_binding(self, binding_id):  # type: ignore[no-untyped-def]
+    async def xmpp_account_for_authentication(self, binding_id):  # type: ignore[no-untyped-def]
         return "user@example.com"
 
 

@@ -35,6 +35,11 @@ class BindingRepository(Protocol):
     async def xmpp_account_for_binding(self, binding_id: BindingId) -> Optional[str]:
         ...
 
+    async def xmpp_account_for_authentication(
+        self, binding_id: BindingId
+    ) -> Optional[str]:
+        ...
+
     async def save_encrypted_credentials(
         self, binding_id: BindingId, backend_id: BackendId, credentials: bytes
     ) -> None:

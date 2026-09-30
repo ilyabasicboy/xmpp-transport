@@ -56,6 +56,17 @@ classes or preserve provider-specific coupling in the new core.
 
 - Treat all projects listed above as references. Inspect them only when the
   current task needs that context.
+- Do not invent, infer, simplify, or redesign backend behavior while porting it.
+  Before implementing a provider flow, inspect the corresponding old transport,
+  its tests, and its observable user interaction. Preserve that behavior unless
+  the task explicitly requests a change.
+- Internal code may be optimized, refactored, or simplified when observable
+  behavior remains equivalent: user actions, state transitions, protocol
+  payloads, ordering, error handling, and recovery semantics must not change.
+  Cover behavioral equivalence with tests before relying on the optimization.
+- In particular, MAX QR authorization continues automatically after `/login`,
+  exactly as in `xmpp-transport-max`; do not introduce a `/continue` command or
+  any other user action that the original flow does not require.
 - Put all normal framework source changes in `xmpp-transport`.
 - Put all normal unified helper-module changes in `module-transport` once that
   project exists.
@@ -460,12 +471,15 @@ the application layer.
 
 Before copying code from either old transport:
 
-1. Identify its responsibility and external assumptions.
-2. Add or preserve tests that describe its observable behavior.
-3. Remove provider-specific names only when the concept is genuinely shared.
-4. Map provider objects at the adapter boundary rather than weakening the shared
+1. Read the original implementation and tests; do not reconstruct backend logic
+   from memory or assumptions.
+2. Identify its responsibility, external assumptions, state transitions, and
+   observable user interaction.
+3. Add or preserve tests that describe its observable behavior.
+4. Remove provider-specific names only when the concept is genuinely shared.
+5. Map provider objects at the adapter boundary rather than weakening the shared
    domain model.
-5. Prefer extracting small proven algorithms and protocol helpers over copying
+6. Prefer extracting small proven algorithms and protocol helpers over copying
    entire `transport.py`, `component.py`, or repository classes.
 
 The old transports are references during development, not runtime or package

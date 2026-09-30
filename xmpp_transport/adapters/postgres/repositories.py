@@ -139,6 +139,21 @@ class AsyncpgBindingRepository:
         )
         return str(value) if value is not None else None
 
+    async def xmpp_account_for_authentication(
+        self, binding_id: BindingId
+    ) -> Optional[str]:
+        value = await self._pool.fetchval(
+            """
+            SELECT account.bare_jid
+            FROM backend_bindings AS binding
+            JOIN xmpp_accounts AS account ON account.id = binding.xmpp_account_id
+            WHERE binding.binding_id = $1
+              AND binding.status IN ('pending', 'active', 'authorization_lost')
+            """,
+            str(binding_id),
+        )
+        return str(value) if value is not None else None
+
     async def binding_for_authentication(
         self, bare_jid: str, backend_id: BackendId
     ) -> Optional[BindingRecord]:

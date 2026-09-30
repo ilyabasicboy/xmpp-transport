@@ -66,6 +66,7 @@ class ContactChanged:
     envelope: EventEnvelope
     contact: Contact
     change: ContactChangeKind = ContactChangeKind.UPSERT
+    force: bool = False
 
 
 @dataclass(frozen=True)

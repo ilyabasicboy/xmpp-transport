@@ -107,9 +107,9 @@ class XmppAuthenticationNotices:
         self._codec = codec
 
     async def deliver(self, binding_id: BindingId, challenge: AuthChallenge) -> None:
-        owner_jid = await self._bindings.xmpp_account_for_binding(binding_id)
+        owner_jid = await self._bindings.xmpp_account_for_authentication(binding_id)
         if owner_jid is None:
-            raise LookupError("active XMPP account not found for binding")
+            raise LookupError("XMPP account not found for authentication binding")
         if challenge.state is AuthState.WAITING_PASSWORD:
             body = "MAX запросил пароль 2FA. Отправьте /password <пароль>."
         elif challenge.state is AuthState.CONNECTED:

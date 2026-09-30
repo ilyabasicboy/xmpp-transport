@@ -177,11 +177,14 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_publishes_direct_snapshot_chat_as_roster_contact(self) -> None:
         await self.session.start()
 
-        await self.client.chat_handler(MaxChat("chat-42", "Alice"))  # type: ignore[misc]
+        await self.client.chat_handler(  # type: ignore[misc]
+            MaxChat("chat-42", "Alice", force_roster_sync=True)
+        )
 
         contacts = [event for event in self.sink.events if isinstance(event, ContactChanged)]
         self.assertEqual(RemoteObjectId("chat-42"), contacts[0].contact.id)
         self.assertEqual("Alice", contacts[0].contact.display_name)
+        self.assertTrue(contacts[0].force)
 
     async def test_exposes_address_book_through_contact_source(self) -> None:
         await self.session.start()

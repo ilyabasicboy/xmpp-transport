@@ -88,6 +88,21 @@ class RosterSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(RosterSyncResult.UNCHANGED, result)
         self.assertEqual(1, len(self.xmpp.operations))
 
+    async def test_forced_snapshot_contact_is_added_even_with_saved_signature(self) -> None:
+        await self.sync.handle(contact_event(self.contact))
+        event = contact_event(self.contact)
+        forced = ContactChanged(
+            envelope=event.envelope,
+            contact=event.contact,
+            change=event.change,
+            force=True,
+        )
+
+        result = await self.sync.handle(forced)
+
+        self.assertEqual(RosterSyncResult.ADDED, result)
+        self.assertEqual(["add", "add"], [item[0] for item in self.xmpp.operations])
+
     async def test_changed_name_uses_explicit_rename(self) -> None:
         await self.sync.handle(contact_event(self.contact))
         changed = Contact(self.contact.id, "Alice Cooper")

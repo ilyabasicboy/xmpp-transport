@@ -306,6 +306,7 @@ class MaxBackendSession:
                         else None
                     ),
                 ),
+                force=chat.force_roster_sync,
             )
         )
 
