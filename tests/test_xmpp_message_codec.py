@@ -3,7 +3,20 @@ from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 
 from xmpp_transport.adapters.xmpp.message_codec import XmppMessageCodec, XmppMessageError
-from xmpp_transport.adapters.xmpp.namespaces import DELAY_NS, REPLY_NS, SID_NS, STANZAS_NS
+from xmpp_transport.adapters.xmpp.namespaces import (
+    BOT_UI_NS,
+    DATA_FORMS_NS,
+    DELAY_NS,
+    REPLY_NS,
+    SID_NS,
+    STANZAS_NS,
+)
+from xmpp_transport.adapters.xmpp.auth_commands import (
+    ControlButton,
+    ControlForm,
+    ControlFormField,
+    ControlResponse,
+)
 from xmpp_transport.domain.errors import InvalidCommand
 from xmpp_transport.domain.identifiers import BindingId, RemoteObjectId
 from xmpp_transport.domain.models import IncomingMessage, ReplyReference
@@ -152,6 +165,40 @@ class SerializeIncomingTests(unittest.TestCase):
             response.find("error/" + tag(STANZAS_NS, "service-unavailable"))
         )
         self.assertNotIn("private message body", xml)
+
+    def test_serializes_bot_ui_keyboard_and_private_form(self) -> None:
+        request = ET.Element(
+            "message", {"from": "user@example.com", "to": "bot@max.example.com"}
+        )
+        response = self.codec.control_reply(
+            request,
+            ControlResponse(
+                "MAX bot",
+                buttons=((ControlButton("Статус", "/status"),),),
+                forms=(
+                    ControlForm(
+                        "Пароль MAX 2FA",
+                        "Введите пароль",
+                        (
+                            ControlFormField(
+                                "password",
+                                label="Пароль",
+                                type="text-private",
+                                required=True,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        button = response.find(
+            ".//{{{}}}button".format(BOT_UI_NS)
+        )
+        self.assertEqual("/status", button.attrib["data"])
+        field = response.find("{{{}}}x/{{{}}}field".format(DATA_FORMS_NS, DATA_FORMS_NS))
+        self.assertEqual("text-private", field.attrib["type"])
+        self.assertIsNotNone(field.find("{{{}}}required".format(DATA_FORMS_NS)))
 
 
 if __name__ == "__main__":

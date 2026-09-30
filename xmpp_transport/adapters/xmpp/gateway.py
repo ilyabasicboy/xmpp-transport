@@ -14,7 +14,7 @@ from xmpp_transport.ports.repositories import BindingRepository
 from .addressing import ContactAddressCodec, DirectRouteResolver, InvalidXmppAddress
 from .auth_commands import ControlResponse
 from .message_codec import XmppMessageCodec, XmppMessageError
-from .namespaces import GROUPS_NS
+from .namespaces import BOT_UI_NS, DATA_FORMS_NS, GROUPS_NS
 
 
 log = logging.getLogger(__name__)
@@ -25,7 +25,9 @@ class ControlHandler(Protocol):
     def accepts(self, to_jid: str) -> bool:
         ...
 
-    async def handle(self, from_jid: str, command: str) -> ControlResponse:
+    async def handle(
+        self, from_jid: str, command: str, form_fields: Optional[dict] = None
+    ) -> ControlResponse:
         ...
 
 
@@ -111,8 +113,13 @@ class XmppDirectMessageGateway:
                     if child.tag.rsplit("}", 1)[-1] == "body":
                         body = "".join(child.itertext())
                         break
+                callback = stanza.find("{{{}}}callback".format(BOT_UI_NS))
+                if callback is not None and callback.attrib.get("data"):
+                    body = callback.attrib["data"]
                 response = await self._control.handle(
-                    stanza.attrib.get("from", ""), body
+                    stanza.attrib.get("from", ""),
+                    body,
+                    _data_form_fields(stanza),
                 )
                 await self._wire.send(self._codec.control_reply(stanza, response))
                 return
@@ -286,3 +293,16 @@ def _strip_group_author_prefix(body: str) -> str:
         return body
     _author, text = body.split(":\n", 1)
     return text
+
+
+def _data_form_fields(stanza: ET.Element) -> Optional[dict]:
+    form = stanza.find("{{{}}}x".format(DATA_FORMS_NS))
+    if form is None or form.attrib.get("type") != "submit":
+        return None
+    fields = {}
+    for field in form.findall("{{{}}}field".format(DATA_FORMS_NS)):
+        name = (field.attrib.get("var") or "").strip()
+        value = field.find("{{{}}}value".format(DATA_FORMS_NS))
+        if name:
+            fields[name] = "" if value is None else (value.text or "")
+    return fields

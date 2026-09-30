@@ -4,6 +4,7 @@ from typing import Optional, Sequence
 from xml.etree import ElementTree as ET
 
 from xmpp_transport.adapters.xmpp.addressing import ContactAddressCodec, DirectRouteResolver
+from xmpp_transport.adapters.xmpp.auth_commands import ControlResponse
 from xmpp_transport.adapters.xmpp.component import ComponentSettings
 from xmpp_transport.adapters.xmpp.gateway import XmppDirectMessageGateway
 from xmpp_transport.adapters.xmpp.message_codec import XmppMessageCodec
@@ -77,15 +78,20 @@ class FakeMessageRouter:
 
 
 class FakeControl:
-    def __init__(self) -> None:
+    def __init__(self, fail_on_handle: bool = True) -> None:
         self.commands = []
+        self.fail_on_handle = fail_on_handle
 
     def accepts(self, to_jid: str) -> bool:
         return to_jid.split("/", 1)[0] == "bot@telegram.example.com"
 
-    async def handle(self, from_jid: str, command: str):  # type: ignore[no-untyped-def]
-        self.commands.append((from_jid, command))
-        raise AssertionError("group system message reached the control handler")
+    async def handle(
+        self, from_jid: str, command: str, form_fields=None  # type: ignore[no-untyped-def]
+    ):
+        self.commands.append((from_jid, command, form_fields))
+        if self.fail_on_handle:
+            raise AssertionError("group system message reached the control handler")
+        return ControlResponse("ok")
 
 
 def error_condition(stanza: ET.Element) -> str:
@@ -217,6 +223,45 @@ class XmppGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Hello MAX group", message.text)
         self.assertEqual("true", message.attributes["is_group"])
         self.assertEqual([], self.wire.sent)
+
+    async def test_routes_bot_ui_callback_and_submitted_form_to_control(self) -> None:
+        control = FakeControl(fail_on_handle=False)
+        gateway = XmppDirectMessageGateway(
+            self.wire,
+            DirectRouteResolver(BackendId("telegram"), self.addresses, self.bindings),
+            self.addresses,
+            self.bindings,
+            self.router,  # type: ignore[arg-type]
+            XmppMessageCodec(),
+            control=control,  # type: ignore[arg-type]
+        )
+        callback = ET.fromstring(
+            """
+            <message from='user@example.com/device' to='bot@telegram.example.com'>
+              <callback xmlns='https://xabber.com/protocol/bot-ui' data='/status'/>
+            </message>
+            """
+        )
+        form = ET.fromstring(
+            """
+            <message from='user@example.com/device' to='bot@telegram.example.com'>
+              <x xmlns='jabber:x:data' type='submit'>
+                <field var='command'><value>password</value></field>
+                <field var='password'><value>secret</value></field>
+              </x>
+            </message>
+            """
+        )
+
+        await gateway.handle_stanza(callback)
+        await gateway.handle_stanza(form)
+
+        self.assertEqual("/status", control.commands[0][1])
+        self.assertEqual(
+            {"command": "password", "password": "secret"},
+            control.commands[1][2],
+        )
+        self.assertEqual(2, len(self.wire.sent))
 
     async def test_missing_binding_returns_service_unavailable(self) -> None:
         self.bindings.record = None

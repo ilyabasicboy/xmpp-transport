@@ -48,6 +48,7 @@ class AuthenticationCoordinator:
         self._challenge_handler = challenge_handler
         self._flows: Dict[BindingId, _ManagedFlow] = {}
         self._tasks: Dict[BindingId, asyncio.Task] = {}
+        self._states: Dict[BindingId, AuthState] = {}
         self._locks: Dict[BindingId, asyncio.Lock] = {}
         self._state_lock = asyncio.Lock()
         self._closed = False
@@ -75,6 +76,7 @@ class AuthenticationCoordinator:
                     self._continue_automatically(binding_id, backend_id)
                 )
                 self._tasks[binding_id] = task
+            self._states[binding_id] = challenge.state
             return challenge
 
     async def respond(
@@ -93,6 +95,7 @@ class AuthenticationCoordinator:
                 raise InvalidCommand("authentication flow belongs to another backend")
             flow = managed.flow
             challenge = await flow.respond(response)
+            self._states[binding_id] = challenge.state
             if challenge.state is AuthState.CONNECTED:
                 plaintext = flow.credentials()
                 encrypted = self._cipher.encrypt(plaintext)
@@ -102,9 +105,11 @@ class AuthenticationCoordinator:
                 await self._sessions.stop(binding_id)
                 await self._sessions.start(binding_id, backend_id)
                 self._flows.pop(binding_id, None)
+                self._states.pop(binding_id, None)
                 await flow.close()
             elif challenge.state in (AuthState.EXPIRED, AuthState.FAILED):
                 self._flows.pop(binding_id, None)
+                self._states.pop(binding_id, None)
                 await flow.close()
             return challenge
 
@@ -115,6 +120,10 @@ class AuthenticationCoordinator:
             flow = self._flows.pop(binding_id, None)
             if flow is not None:
                 await flow.flow.close()
+            self._states.pop(binding_id, None)
+
+    def state(self, binding_id: BindingId) -> Optional[AuthState]:
+        return self._states.get(binding_id)
 
     async def close(self) -> None:
         async with self._state_lock:
@@ -125,6 +134,7 @@ class AuthenticationCoordinator:
             self._tasks.clear()
             flows = tuple(managed.flow for managed in self._flows.values())
             self._flows.clear()
+            self._states.clear()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

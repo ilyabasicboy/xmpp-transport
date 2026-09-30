@@ -39,6 +39,7 @@ class Authentication:
     def __init__(self) -> None:
         self.begun = None
         self.responses = []
+        self.current_state = AuthState.WAITING_PASSWORD
 
     async def begin(self, binding_id, backend_id):  # type: ignore[no-untyped-def]
         self.begun = (binding_id, backend_id)
@@ -50,6 +51,9 @@ class Authentication:
 
     async def cancel(self, binding_id):  # type: ignore[no-untyped-def]
         return None
+
+    def state(self, binding_id):  # type: ignore[no-untyped-def]
+        return self.current_state
 
 
 class Contacts:
@@ -141,6 +145,40 @@ class XmppAuthenticationCommandTests(unittest.IsolatedAsyncioTestCase):
 
         for command in ("/login", "/password", "/status", "/contacts", "/add", "/logout"):
             self.assertIn(command, response.body)
+        self.assertEqual("/login", response.buttons[0][0].data)
+        self.assertEqual("/help", response.buttons[-1][-1].data)
+
+    async def test_password_command_returns_private_data_form(self) -> None:
+        commands = XmppAuthenticationCommands(
+            BackendId("max"),
+            "max.example.com",
+            Bindings(),  # type: ignore[arg-type]
+            Authentication(),  # type: ignore[arg-type]
+        )
+
+        response = await commands.handle("user@example.com", "/password")
+
+        self.assertEqual(1, len(response.forms))
+        self.assertEqual("password", response.forms[0].fields[0].value)
+        self.assertEqual("text-private", response.forms[0].fields[1].type)
+        self.assertTrue(response.forms[0].fields[1].required)
+
+    async def test_submitted_password_form_uses_authentication_flow(self) -> None:
+        authentication = Authentication()
+        commands = XmppAuthenticationCommands(
+            BackendId("max"),
+            "max.example.com",
+            Bindings(),  # type: ignore[arg-type]
+            authentication,  # type: ignore[arg-type]
+        )
+
+        await commands.handle(
+            "user@example.com",
+            "",
+            {"command": "password", "password": "secret"},
+        )
+
+        self.assertEqual("secret", authentication.responses[0][2].secret)
 
     async def test_contacts_uses_active_backend_feature(self) -> None:
         commands = XmppAuthenticationCommands(

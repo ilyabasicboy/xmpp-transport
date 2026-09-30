@@ -30,6 +30,31 @@ class ControlMedia:
 class ControlResponse:
     body: str
     media: Sequence[ControlMedia] = field(default_factory=tuple)
+    buttons: Sequence[Sequence["ControlButton"]] = field(default_factory=tuple)
+    forms: Sequence["ControlForm"] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class ControlButton:
+    label: str
+    data: str
+    type: str = "command"
+
+
+@dataclass(frozen=True)
+class ControlFormField:
+    name: str
+    label: str = ""
+    type: str = "text-single"
+    value: str = ""
+    required: bool = False
+
+
+@dataclass(frozen=True)
+class ControlForm:
+    title: str
+    instructions: str
+    fields: Sequence[ControlFormField]
 
 
 class XmppAuthenticationCommands:
@@ -60,23 +85,32 @@ class XmppAuthenticationCommands:
     def accepts(self, to_jid: str) -> bool:
         return to_jid.split("/", 1)[0].strip().lower() == self._control_jid
 
-    async def handle(self, from_jid: str, command: str) -> ControlResponse:
+    async def handle(
+        self,
+        from_jid: str,
+        command: str,
+        form_fields: Optional[dict] = None,
+    ) -> ControlResponse:
+        if form_fields:
+            if form_fields.get("command", "").strip().lower() != "password":
+                return self._response("Неизвестная форма.")
+            command = "/password {}".format(form_fields.get("password", ""))
         value = command.strip()
         command_name, _, argument = value.partition(" ")
         command_name = command_name.lower()
         owner = bare_jid(from_jid)
         if command_name in ("/help", "/?") or not command_name.startswith("/"):
-            return ControlResponse(self.help_text())
+            return self._response(self.help_text())
         if command_name == "/status":
-            return ControlResponse(await self._status(owner))
+            return self._response(await self._status(owner))
         if command_name == "/logout":
-            return ControlResponse(await self._logout(owner))
+            return self._response(await self._logout(owner))
         if command_name == "/contacts":
-            return ControlResponse(await self._contacts(owner, argument))
+            return await self._contacts(owner, argument)
         if command_name == "/add":
-            return ControlResponse(await self._add(owner, argument))
+            return self._response(await self._add(owner, argument))
         if command_name not in ("/login", "/password"):
-            return ControlResponse("Неизвестная команда.\n\n" + self.help_text())
+            return self._response("Неизвестная команда.\n\n" + self.help_text())
         if command_name == "/login":
             binding = await self._bindings.ensure_binding(owner, self._backend_id)
             challenge = await self._authentication.begin(
@@ -90,7 +124,19 @@ class XmppAuthenticationCommands:
                 raise LookupError("binding is not available for authentication")
         if command_name == "/password":
             if not argument:
-                return ControlResponse("Использование: /password <пароль>")
+                binding = await self._bindings.binding_for_authentication(
+                    owner, self._backend_id
+                )
+                if (
+                    binding is None
+                    or self._authentication.state(binding.binding_id)
+                    is not AuthState.WAITING_PASSWORD
+                ):
+                    return self._response(
+                        "MAX сейчас не ожидает пароль 2FA. "
+                        "Отправьте /login, чтобы начать авторизацию."
+                    )
+                return self._password_form()
             challenge = await self._authentication.respond(
                 binding.binding_id,
                 self._backend_id,
@@ -98,17 +144,18 @@ class XmppAuthenticationCommands:
             )
         if challenge.state is AuthState.WAITING_QR:
             if not challenge.public_url:
-                return ControlResponse("MAX не вернул данные для QR-кода.")
+                return self._response("MAX не вернул данные для QR-кода.")
             return ControlResponse(
                 "Отсканируйте QR-код приложением MAX.\n"
                 "После подтверждения transport сообщит о результате здесь.",
                 (_qr_svg(challenge.public_url),),
+                buttons=self._main_menu_buttons(),
             )
         if challenge.state is AuthState.WAITING_PASSWORD:
-            return ControlResponse("MAX запросил пароль 2FA. Отправьте /password <пароль>.")
+            return self._response("MAX запросил пароль 2FA. Отправьте /password <пароль>.")
         if challenge.state is AuthState.CONNECTED:
-            return ControlResponse("MAX успешно подключён.")
-        return ControlResponse(challenge.message or "Авторизация MAX завершилась с ошибкой.")
+            return self._response("MAX успешно подключён.")
+        return self._response(challenge.message or "Авторизация MAX завершилась с ошибкой.")
 
     async def _active(self, owner: str):  # type: ignore[no-untyped-def]
         binding = await self._bindings.binding_for_authentication(owner, self._backend_id)
@@ -125,22 +172,22 @@ class XmppAuthenticationCommands:
             return "MAX подключен."
         return "MAX-сессия сохранена, но сейчас не подключена."
 
-    async def _contacts(self, owner: str, argument: str) -> str:
+    async def _contacts(self, owner: str, argument: str) -> ControlResponse:
         binding, source = await self._active(owner)
         if binding is None or source is None:
-            return "MAX не подключен. Отправьте /login для авторизации."
+            return self._response("MAX не подключен. Отправьте /login для авторизации.")
         try:
             page = int(argument) if argument else 1
         except ValueError:
-            return "Номер страницы должен быть целым числом."
+            return self._response("Номер страницы должен быть целым числом.")
         if page < 1:
-            return "Используйте: /contacts [страница]"
+            return self._response("Используйте: /contacts [страница]")
         contacts = tuple(await source.contacts())
         if not contacts:
-            return "В MAX нет сохраненных контактов."
+            return self._response("В MAX нет сохраненных контактов.")
         start = (page - 1) * self._contacts_page_size
         if start >= len(contacts):
-            return "Такой страницы контактов нет."
+            return self._response("Такой страницы контактов нет.")
         shown = contacts[start : start + self._contacts_page_size]
         total = (len(contacts) + self._contacts_page_size - 1) // self._contacts_page_size
         lines = ["Контакты MAX, страница {}/{}:".format(page, total)]
@@ -152,7 +199,20 @@ class XmppAuthenticationCommands:
         if page < total:
             lines.append("Следующая страница: /contacts {}".format(page + 1))
         lines.append("Добавить по телефону: /add phone +79990000000")
-        return "\n".join(lines)
+        rows = []
+        navigation = []
+        if page > 1:
+            navigation.append(ControlButton("Назад", "/contacts {}".format(page - 1)))
+        if page < total:
+            navigation.append(ControlButton("Дальше", "/contacts {}".format(page + 1)))
+        if navigation:
+            rows.append(tuple(navigation))
+        rows.extend(
+            (ControlButton("Добавить: {}".format(contact.display_name), "/add {}".format(start + index)),)
+            for index, contact in enumerate(shown, start=1)
+        )
+        rows.extend(self._main_menu_buttons())
+        return ControlResponse("\n".join(lines), buttons=tuple(rows))
 
     async def _add(self, owner: str, argument: str) -> str:
         binding, source = await self._active(owner)
@@ -200,6 +260,36 @@ class XmppAuthenticationCommands:
             "/add phone +79990000000 - добавить контакт MAX по телефону\n"
             "/logout - отключить MAX и удалить сохраненную сессию\n"
             "/help - показать команды"
+        )
+
+    @classmethod
+    def _response(cls, body: str) -> ControlResponse:
+        return ControlResponse(body, buttons=cls._main_menu_buttons())
+
+    @staticmethod
+    def _main_menu_buttons():  # type: ignore[no-untyped-def]
+        return (
+            (ControlButton("Подключить MAX", "/login"), ControlButton("Статус", "/status")),
+            (ControlButton("Контакты", "/contacts"), ControlButton("Отключить", "/logout")),
+            (ControlButton("Пароль 2FA", "/password"), ControlButton("Помощь", "/help")),
+        )
+
+    @classmethod
+    def _password_form(cls) -> ControlResponse:
+        return ControlResponse(
+            "MAX запросил пароль двухфакторной авторизации.\n"
+            "Введите пароль в форме. Transport передаст его MAX однократно и не сохранит.",
+            buttons=cls._main_menu_buttons(),
+            forms=(
+                ControlForm(
+                    "Пароль MAX 2FA",
+                    "Введите пароль MAX для продолжения авторизации.",
+                    (
+                        ControlFormField("command", type="hidden", value="password"),
+                        ControlFormField("password", label="Пароль", type="text-private", required=True),
+                    ),
+                ),
+            ),
         )
 
 

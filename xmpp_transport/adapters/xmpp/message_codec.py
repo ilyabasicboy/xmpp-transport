@@ -7,6 +7,7 @@ and domain layers.
 
 from datetime import timezone
 from enum import Enum
+from html import escape
 from typing import TYPE_CHECKING, Optional
 from xml.etree import ElementTree as ET
 
@@ -16,9 +17,11 @@ from xmpp_transport.domain.models import IncomingMessage, OutgoingMessage, Reply
 
 from .namespaces import (
     CLIENT_NS,
+    BOT_UI_NS,
     CHAT_MARKERS_NS,
     COMPONENT_ACCEPT_NS,
     DELAY_NS,
+    DATA_FORMS_NS,
     FILES_NS,
     REPLY_NS,
     SID_NS,
@@ -164,6 +167,22 @@ class XmppMessageCodec:
             begin = len(body)
             body += media.name
             media_ranges.append((media, begin, len(body)))
+        button_range = None
+        if reply.buttons:
+            lines = []
+            for row_index, row in enumerate(reply.buttons):
+                for button_index, button in enumerate(row):
+                    action = button.data or "/button_{}_{}".format(
+                        row_index + 1, button_index + 1
+                    )
+                    lines.append("{} - {}".format(action, button.label))
+            if lines:
+                if body:
+                    body = body.rstrip() + "\n\n"
+                begin = len(escape(body))
+                fallback = "Команды кнопок:\n" + "\n".join(lines)
+                body += fallback
+                button_range = (begin, begin + len(escape(fallback)))
         response = self.text_reply(request, body)
         for media, begin, end in media_ranges:
             reference = ET.SubElement(
@@ -178,6 +197,47 @@ class XmppMessageCodec:
             ET.SubElement(file_element, "size").text = str(media.size)
             sources = ET.SubElement(sharing, "sources")
             ET.SubElement(sources, "uri").text = media.data_uri
+        if button_range is not None:
+            reference = ET.SubElement(
+                response,
+                _tag(XABBER_REFERENCES_NS, "reference"),
+                {
+                    "type": "mutable",
+                    "begin": str(button_range[0]),
+                    "end": str(button_range[1]),
+                },
+            )
+            keyboard = ET.SubElement(reference, _tag(BOT_UI_NS, "keyboard"), {"type": "inline"})
+            for row_index, row in enumerate(reply.buttons):
+                row_element = ET.SubElement(keyboard, _tag(BOT_UI_NS, "row"))
+                for button_index, button in enumerate(row):
+                    data = button.data
+                    command = data[1:].strip() if data.startswith("/") else data
+                    if not command or any(character.isspace() for character in command):
+                        command = "button_{}_{}".format(row_index + 1, button_index + 1)
+                    ET.SubElement(
+                        row_element,
+                        _tag(BOT_UI_NS, "button"),
+                        {
+                            "id": command,
+                            "type": button.type,
+                            "label": button.label,
+                            "data": data,
+                        },
+                    )
+        for form in reply.forms:
+            form_element = ET.SubElement(response, _tag(DATA_FORMS_NS, "x"), {"type": "form"})
+            ET.SubElement(form_element, _tag(DATA_FORMS_NS, "title")).text = form.title
+            ET.SubElement(form_element, _tag(DATA_FORMS_NS, "instructions")).text = form.instructions
+            for field in form.fields:
+                attributes = {"var": field.name, "type": field.type}
+                if field.label:
+                    attributes["label"] = field.label
+                field_element = ET.SubElement(form_element, _tag(DATA_FORMS_NS, "field"), attributes)
+                if field.value:
+                    ET.SubElement(field_element, _tag(DATA_FORMS_NS, "value")).text = field.value
+                if field.required:
+                    ET.SubElement(field_element, _tag(DATA_FORMS_NS, "required"))
         return response
 
     def control_notice(

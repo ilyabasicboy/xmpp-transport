@@ -1,6 +1,8 @@
 CLIENT_NS = "jabber:client"
 COMPONENT_ACCEPT_NS = "jabber:component:accept"
 CHAT_MARKERS_NS = "urn:xmpp:chat-markers:0"
+BOT_UI_NS = "https://xabber.com/protocol/bot-ui"
+DATA_FORMS_NS = "jabber:x:data"
 GROUPS_NS = "https://xabber.com/protocol/groups"
 NICK_NS = "http://jabber.org/protocol/nick"
 DELAY_NS = "urn:xmpp:delay"
