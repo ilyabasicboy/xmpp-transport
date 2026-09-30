@@ -16,6 +16,7 @@ from xmpp_transport.domain.models import IncomingMessage, OutgoingMessage, Reply
 
 from .namespaces import (
     CLIENT_NS,
+    CHAT_MARKERS_NS,
     COMPONENT_ACCEPT_NS,
     DELAY_NS,
     FILES_NS,
@@ -94,6 +95,25 @@ class XmppMessageCodec:
             occurred_at = occurred_at.replace(tzinfo=timezone.utc)
         stamp = occurred_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         ET.SubElement(element, _tag(DELAY_NS, "delay"), {"stamp": stamp})
+        return element
+
+    def serialize_group_self(
+        self,
+        message: IncomingMessage,
+        from_jid: str,
+        group_jid: str,
+        transport_namespace: str,
+    ) -> ET.Element:
+        """Render a MAX-authored group message as Xabber fake outgoing traffic."""
+        element = self.serialize_incoming(message, from_jid, group_jid)
+        message_id = element.attrib["id"]
+        ET.SubElement(element, _tag(CHAT_MARKERS_NS, "markable"))
+        # The transport marker prevents the component from sending its own synthetic
+        # outgoing stanza back to the provider.
+        ET.SubElement(element, _tag(transport_namespace, "fake-outgoing"))
+        origin = element.find(_tag(SID_NS, "origin-id"))
+        if origin is None:
+            ET.SubElement(element, _tag(SID_NS, "origin-id"), {"id": message_id})
         return element
 
     def error_reply(

@@ -7,7 +7,7 @@ from xmpp_transport.adapters.xmpp.addressing import ContactAddressCodec, DirectR
 from xmpp_transport.adapters.xmpp.component import ComponentSettings
 from xmpp_transport.adapters.xmpp.gateway import XmppDirectMessageGateway
 from xmpp_transport.adapters.xmpp.message_codec import XmppMessageCodec
-from xmpp_transport.adapters.xmpp.namespaces import STANZAS_NS
+from xmpp_transport.adapters.xmpp.namespaces import CHAT_MARKERS_NS, STANZAS_NS
 from xmpp_transport.domain.errors import FeatureUnavailable
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
 from xmpp_transport.domain.models import IncomingMessage, OutgoingMessage
@@ -94,6 +94,7 @@ class XmppGatewayTests(unittest.IsolatedAsyncioTestCase):
             self.bindings,
             self.router,  # type: ignore[arg-type]
             XmppMessageCodec(),
+            transport_namespace="urn:xabber:transport:telegram:1",
         )
 
     async def test_lifecycle_delegates_to_wire(self) -> None:
@@ -116,6 +117,22 @@ class XmppGatewayTests(unittest.IsolatedAsyncioTestCase):
         message = self.router.outgoing[0]
         self.assertEqual(BindingId("binding-1"), message.binding_id)
         self.assertEqual(RemoteObjectId("123"), message.conversation_id)
+        self.assertEqual([], self.wire.sent)
+
+    async def test_ignores_transport_generated_fake_outgoing_stanza(self) -> None:
+        stanza = ET.fromstring(
+            """
+            <message from='bot@max.example.com'
+                     to='maxg-owner-888@example.com' type='chat' id='remote-1'>
+              <body>Sent from MAX</body>
+              <fake-outgoing xmlns='urn:xabber:transport:telegram:1'/>
+            </message>
+            """
+        )
+
+        await self.gateway.handle_stanza(stanza)
+
+        self.assertEqual([], self.router.outgoing)
         self.assertEqual([], self.wire.sent)
 
     async def test_missing_binding_returns_service_unavailable(self) -> None:
@@ -187,6 +204,43 @@ class XmppGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(LookupError):
             await self.gateway.deliver_message(message)
+
+    async def test_delivers_group_self_message_as_fake_outgoing(self) -> None:
+        # Exercise the separately configured delivery sink used by composition.
+        from xmpp_transport.adapters.xmpp.gateway import XmppMessageDelivery
+
+        sink = XmppMessageDelivery(
+            self.wire,
+            ContactAddressCodec("max.example.com"),
+            self.bindings,
+            XmppMessageCodec(),
+            server_domain="example.com",
+            control_jid="bot@max.example.com",
+            transport_namespace="urn:xabber:transport:max:1",
+            group_localpart_prefix="maxg",
+        )
+        message = IncomingMessage(
+            id=RemoteObjectId("group-message-1"),
+            binding_id=BindingId("binding-1"),
+            conversation_id=RemoteObjectId("888"),
+            sender_id=RemoteObjectId("100"),
+            occurred_at=datetime.now(timezone.utc),
+            text="Sent from MAX",
+            attributes={"is_group": "true", "is_self": "true"},
+        )
+
+        await sink.deliver_message(message)
+
+        stanza = self.wire.sent[0]
+        self.assertEqual("bot@max.example.com", stanza.attrib["from"])
+        self.assertEqual(
+            "maxg-75736572406578616d706c652e636f6d-888@example.com",
+            stanza.attrib["to"],
+        )
+        self.assertIsNotNone(stanza.find("{{{}}}markable".format(CHAT_MARKERS_NS)))
+        self.assertIsNotNone(
+            stanza.find("{urn:xabber:transport:max:1}fake-outgoing")
+        )
 
 
 class ComponentSettingsTests(unittest.TestCase):

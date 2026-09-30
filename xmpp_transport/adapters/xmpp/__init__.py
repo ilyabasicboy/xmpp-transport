@@ -4,6 +4,7 @@ from .addressing import ContactAddressCodec, DirectRouteResolver, InvalidXmppAdd
 from .auth_commands import XmppAuthenticationCommands, XmppAuthenticationNotices
 from .component import ComponentSettings, SlixmppComponentWire
 from .gateway import XmppDirectMessageGateway, XmppMessageDelivery
+from .groups import XmppGroupManager
 from .message_codec import XmppMessageCodec, XmppMessageError
 from .roster import XmppServerRoster
 
@@ -15,6 +16,7 @@ __all__ = [
     "SlixmppComponentWire",
     "XmppDirectMessageGateway",
     "XmppMessageDelivery",
+    "XmppGroupManager",
     "XmppMessageCodec",
     "XmppMessageError",
     "XmppServerRoster",

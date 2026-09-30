@@ -17,6 +17,7 @@ from xmpp_transport.domain.auth import AuthResponse, AuthResponseKind, AuthState
 from xmpp_transport.domain.events import (
     AuthorizationLost,
     ContactChanged,
+    ConversationChanged,
     MessageReceived,
     SessionStateChanged,
 )
@@ -124,6 +125,12 @@ class MaxBackendPluginTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             plugin.create_session(BindingId("binding-1"), b"invalid", object())  # type: ignore[arg-type]
 
+    def test_rejects_invalid_self_message_setting(self) -> None:
+        plugin = MaxBackendPlugin()
+
+        with self.assertRaisesRegex(ValueError, "test_self_messages"):
+            plugin.configure({"test_self_messages": "sometimes"})
+
 
 class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -174,6 +181,78 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(RemoteObjectId("chat-1"), messages[0].message.conversation_id)
         self.assertEqual("expired", lost[0].reason)
 
+    async def test_ignores_self_messages_in_direct_chats(self) -> None:
+        plugin = MaxBackendPlugin(
+            lambda credentials: self.client,
+            test_self_messages=True,
+        )  # type: ignore[arg-type]
+        session = plugin.create_session(
+            BindingId("binding-1"),
+            MaxCredentials("token", "device", "account").encode(),
+            self.sink,  # type: ignore[arg-type]
+        )
+        await session.start()
+
+        await self.client.message_handler(  # type: ignore[misc]
+            MaxIncomingMessage(
+                sender_id="account",
+                text="direct self",
+                chat_id="chat-1",
+                message_id="self-direct-1",
+                is_self=True,
+            )
+        )
+
+        self.assertFalse(
+            any(isinstance(event, MessageReceived) for event in self.sink.events)
+        )
+
+    async def test_publishes_group_self_message_when_enabled(self) -> None:
+        plugin = MaxBackendPlugin(lambda credentials: self.client)  # type: ignore[arg-type]
+        plugin.configure({"test_self_messages": "true"})
+        session = plugin.create_session(
+            BindingId("binding-1"),
+            MaxCredentials("token", "device", "account").encode(),
+            self.sink,  # type: ignore[arg-type]
+        )
+        await session.start()
+
+        await self.client.message_handler(  # type: ignore[misc]
+            MaxIncomingMessage(
+                sender_id="account",
+                text="group self",
+                chat_id="group-1",
+                message_id="self-group-1",
+                is_self=True,
+                is_group=True,
+            )
+        )
+
+        messages = [
+            event for event in self.sink.events if isinstance(event, MessageReceived)
+        ]
+        self.assertEqual(1, len(messages))
+        self.assertEqual("true", messages[0].message.attributes["is_self"])
+        self.assertEqual("true", messages[0].message.attributes["is_group"])
+
+    async def test_ignores_group_self_message_when_disabled(self) -> None:
+        await self.session.start()
+
+        await self.client.message_handler(  # type: ignore[misc]
+            MaxIncomingMessage(
+                sender_id="account",
+                text="group self",
+                chat_id="group-1",
+                message_id="self-group-1",
+                is_self=True,
+                is_group=True,
+            )
+        )
+
+        self.assertFalse(
+            any(isinstance(event, MessageReceived) for event in self.sink.events)
+        )
+
     async def test_publishes_direct_snapshot_chat_as_roster_contact(self) -> None:
         await self.session.start()
 
@@ -185,6 +264,31 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(RemoteObjectId("chat-42"), contacts[0].contact.id)
         self.assertEqual("Alice", contacts[0].contact.display_name)
         self.assertTrue(contacts[0].force)
+
+    async def test_publishes_group_snapshot_as_conversation(self) -> None:
+        from xmpp_transport.adapters.backends.max.models import MaxChatMember
+
+        await self.session.start()
+        await self.client.chat_handler(  # type: ignore[misc]
+            MaxChat(
+                "group-42",
+                "MAX Group",
+                is_group=True,
+                members=(MaxChatMember("user-7", "Alice"),),
+            )
+        )
+
+        conversations = [
+            event
+            for event in self.sink.events
+            if isinstance(event, ConversationChanged)
+        ]
+        self.assertEqual(1, len(conversations))
+        self.assertEqual("MAX Group", conversations[0].conversation.title)
+        self.assertEqual("Alice", conversations[0].conversation.participants[0].display_name)
+        self.assertFalse(
+            any(isinstance(event, ContactChanged) for event in self.sink.events)
+        )
 
     async def test_exposes_address_book_through_contact_source(self) -> None:
         await self.session.start()

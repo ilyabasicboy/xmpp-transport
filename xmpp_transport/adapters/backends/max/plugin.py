@@ -15,6 +15,7 @@ from xmpp_transport.domain.errors import BackendUnavailable, FeatureUnavailable,
 from xmpp_transport.domain.events import (
     AuthorizationLost,
     ContactChanged,
+    ConversationChanged,
     EventEnvelope,
     MessageReceived,
     SessionState,
@@ -24,8 +25,11 @@ from xmpp_transport.domain.identifiers import BackendId, BindingId, EventId, Rem
 from xmpp_transport.domain.models import (
     Avatar,
     Contact,
+    Conversation,
+    ConversationKind,
     IncomingMessage,
     OutgoingMessage,
+    Participant,
     ReplyReference,
 )
 from xmpp_transport.ports.backend import ContactSource, MessageSender, SendResult
@@ -196,11 +200,13 @@ class MaxBackendSession:
         credentials: MaxCredentials,
         event_sink: BackendEventSink,
         client_factory: MaxClientFactory,
+        test_self_messages: bool = False,
     ) -> None:
         self._binding_id = binding_id
         self._credentials = credentials
         self._event_sink = event_sink
         self._client = client_factory(credentials)
+        self._test_self_messages = test_self_messages
         self._started = False
         self._closed = False
 
@@ -264,7 +270,11 @@ class MaxBackendSession:
         return SendResult(RemoteObjectId(str(remote_id)))
 
     async def _receive_message(self, message: MaxIncomingMessage) -> None:
-        if message.is_self or not message.chat_id or not message.message_id:
+        if not message.chat_id or not message.message_id:
+            return
+        if message.is_self and (
+            not message.is_group or not self._test_self_messages
+        ):
             return
         reply = (
             ReplyReference(RemoteObjectId(message.reply_to_message_id))
@@ -284,6 +294,7 @@ class MaxBackendSession:
                     reply_to=reply,
                     attributes={
                         "is_group": "true" if message.is_group else "false",
+                        "is_self": "true" if message.is_self else "false",
                         "sender_title": message.sender_title or "",
                         "chat_title": message.chat_title or "",
                     },
@@ -293,6 +304,28 @@ class MaxBackendSession:
 
     async def _receive_chat(self, chat: MaxChat) -> None:
         if chat.is_group:
+            await self._event_sink.publish(
+                ConversationChanged(
+                    envelope=self._envelope(ConversationChanged.EVENT_TYPE),
+                    conversation=Conversation(
+                        id=RemoteObjectId(chat.chat_id),
+                        kind=ConversationKind.GROUP,
+                        title=chat.title,
+                        participants=tuple(
+                            Participant(
+                                id=RemoteObjectId(member.user_id),
+                                display_name=member.title,
+                            )
+                            for member in chat.members
+                        ),
+                        avatar=(
+                            Avatar(chat.avatar.url, chat.avatar.avatar_id)
+                            if chat.avatar is not None
+                            else None
+                        ),
+                    ),
+                )
+            )
             return
         await self._event_sink.publish(
             ContactChanged(
@@ -354,8 +387,20 @@ class MaxBackendSession:
 class MaxBackendPlugin:
     backend_id = BackendId("max")
 
-    def __init__(self, client_factory: Optional[MaxClientFactory] = None) -> None:
+    def __init__(
+        self,
+        client_factory: Optional[MaxClientFactory] = None,
+        *,
+        test_self_messages: bool = False,
+    ) -> None:
         self._client_factory = client_factory or self._create_client
+        self._test_self_messages = test_self_messages
+
+    def configure(self, options: Mapping[str, str]) -> None:
+        value = options.get("test_self_messages", "false").strip().lower()
+        if value not in ("true", "false"):
+            raise ValueError("test_self_messages must be true or false")
+        self._test_self_messages = value == "true"
 
     @staticmethod
     def _create_client(credentials: MaxCredentials) -> MaxClient:
@@ -380,4 +425,5 @@ class MaxBackendPlugin:
             MaxCredentials.decode(credentials),
             event_sink,
             self._client_factory,
+            self._test_self_messages,
         )

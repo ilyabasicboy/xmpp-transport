@@ -1,7 +1,7 @@
 from typing import Protocol
 
 from xmpp_transport.domain.identifiers import BindingId
-from xmpp_transport.domain.models import Contact, IncomingMessage
+from xmpp_transport.domain.models import Contact, Conversation, IncomingMessage
 
 
 class XmppMessageSink(Protocol):
@@ -17,4 +17,11 @@ class XmppRoster(Protocol):
         ...
 
     async def remove_contact(self, binding_id: BindingId, contact: Contact) -> None:
+        ...
+
+
+class XmppGroupManager(Protocol):
+    async def ensure_group(
+        self, binding_id: BindingId, conversation: Conversation
+    ) -> None:
         ...

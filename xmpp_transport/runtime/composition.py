@@ -19,6 +19,7 @@ from xmpp_transport.adapters.xmpp import (
     DirectRouteResolver,
     SlixmppComponentWire,
     XmppDirectMessageGateway,
+    XmppGroupManager,
     XmppAuthenticationCommands,
     XmppAuthenticationNotices,
     XmppMessageCodec,
@@ -28,6 +29,7 @@ from xmpp_transport.adapters.xmpp import (
 from xmpp_transport.application import (
     AuthenticationCoordinator,
     BackendEventDispatcher,
+    ConversationSync,
     MessageRouter,
     RosterSync,
     SessionSupervisor,
@@ -145,7 +147,24 @@ class SingleBackendRuntime:
 
         addresses = ContactAddressCodec(self._backend.component_domain)
         codec = XmppMessageCodec()
-        delivery = XmppMessageDelivery(self._wire, addresses, bindings, codec)
+        control_localpart = self._backend.options.get("control_localpart", "bot")
+        server_domain = self._backend.options.get(
+            "server_domain", _server_domain(self._backend.component_domain)
+        )
+        roster_namespace = self._backend.options.get(
+            "roster_namespace",
+            "urn:xabber:transport:{}:1".format(self._backend.name),
+        )
+        delivery = XmppMessageDelivery(
+            self._wire,
+            addresses,
+            bindings,
+            codec,
+            server_domain=server_domain,
+            control_jid="{}@{}".format(control_localpart, self._backend.component_domain),
+            transport_namespace=roster_namespace,
+            group_localpart_prefix="{}g".format(self._backend.name),
+        )
         messages = MessageRouter(sessions, mappings, delivery)
         routes = DirectRouteResolver(self._plugin.backend_id, addresses, bindings)
         dispatcher = BackendEventDispatcher()
@@ -153,27 +172,32 @@ class SingleBackendRuntime:
         dispatcher.register(AuthorizationLost, self._authorization_lost_handler(sessions))
         dispatcher.register(SessionStateChanged, self._observe_session_state)
         dispatcher.register(MessageChanged, self._unsupported_event)
-        dispatcher.register(ConversationChanged, self._unsupported_event)
         roster = self._roster or XmppServerRoster(
             self._wire,
             bindings,
             addresses,
             self._backend.component_domain,
-            self._backend.options.get(
-                "server_domain", _server_domain(self._backend.component_domain)
-            ),
-            self._backend.options.get(
-                "roster_namespace",
-                "urn:xabber:transport:{}:1".format(self._backend.name),
-            ),
+            server_domain,
+            roster_namespace,
             (self._backend.options.get("roster_group", self._backend.name.upper()),),
         )
         roster_sync = RosterSync(AsyncpgRosterSyncRepository(pool), roster)
         dispatcher.register(ContactChanged, roster_sync.handle)
+        group_sync = ConversationSync(
+            XmppGroupManager(
+                self._wire,
+                bindings,
+                self._backend.component_domain,
+                server_domain,
+                control_localpart,
+                "{}g".format(self._backend.name),
+                self._backend.name.upper(),
+            )
+        )
+        dispatcher.register(ConversationChanged, group_sync.handle)
 
         event_bus = InMemoryEventBus(dispatcher)
         relay.bind(event_bus)
-        control_localpart = self._backend.options.get("control_localpart", "bot")
         notices = XmppAuthenticationNotices(
             "{}@{}".format(control_localpart, self._backend.component_domain),
             bindings,
@@ -202,6 +226,7 @@ class SingleBackendRuntime:
             messages,
             codec,
             control=control,
+            transport_namespace=roster_namespace,
         )
         application = ApplicationRuntime(
             self._health,
@@ -246,6 +271,9 @@ def compose_single_backend(
     if config.database is None:
         raise ValueError("single-backend runtime requires [database] configuration")
     backend = config.backends[0]
+    configure_plugin = getattr(plugin, "configure", None)
+    if configure_plugin is not None:
+        configure_plugin(backend.options)
     secret_environment = backend.options.get(
         "component_secret_env",
         "XABBER_TRANSPORT_{}_COMPONENT_SECRET".format(backend.name.upper().replace("-", "_")),
