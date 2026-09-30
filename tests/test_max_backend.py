@@ -23,7 +23,7 @@ from xmpp_transport.domain.events import (
 )
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
 from xmpp_transport.domain.models import OutgoingMessage
-from xmpp_transport.ports.backend import ContactSource, MessageSender
+from xmpp_transport.ports.backend import ContactAdder, ContactSource, MessageSender
 
 
 class EventSink:
@@ -64,6 +64,9 @@ class MaxClient:
 
     async def list_contacts(self):  # type: ignore[no-untyped-def]
         return [MaxContact("user-1", "Alice", "chat-1")]
+
+    async def add_contact_by_phone(self, phone):  # type: ignore[no-untyped-def]
+        return MaxContact("user-2", "Bob", "chat-2")
 
 
 class LoginError(RuntimeError):
@@ -390,6 +393,15 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         contacts = await source.contacts()  # type: ignore[attr-defined]
 
         self.assertEqual(RemoteObjectId("chat-1"), contacts[0].id)
+
+    async def test_adds_contact_by_phone_through_optional_feature(self) -> None:
+        await self.session.start()
+
+        adder = self.session.features()[ContactAdder]
+        contact = await adder.add_contact_by_phone("+79990000000")  # type: ignore[attr-defined]
+
+        self.assertEqual(RemoteObjectId("chat-2"), contact.id)
+        self.assertEqual("Bob", contact.display_name)
 
 
 class MaxAuthenticationFlowTests(unittest.IsolatedAsyncioTestCase):

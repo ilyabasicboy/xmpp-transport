@@ -194,6 +194,20 @@ class AsyncpgBindingRepository:
         if status != "UPDATE 1":
             raise LookupError("binding not found for credential update: {}".format(binding_id))
 
+    async def disable_binding(self, binding_id: BindingId) -> None:
+        status = await self._pool.execute(
+            """
+            UPDATE backend_bindings
+            SET encrypted_credentials = NULL,
+                status = 'disabled',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE binding_id = $1
+            """,
+            str(binding_id),
+        )
+        if status != "UPDATE 1":
+            raise LookupError("binding not found for logout: {}".format(binding_id))
+
 
 class AsyncpgMessageMappingRepository:
     def __init__(self, pool: DatabasePool) -> None:

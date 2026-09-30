@@ -28,6 +28,11 @@ class ContactSource(Protocol):
         ...
 
 
+class ContactAdder(Protocol):
+    async def add_contact_by_phone(self, phone: str) -> Contact:
+        ...
+
+
 class ConversationSource(Protocol):
     async def conversations(self) -> Sequence[Conversation]:
         ...

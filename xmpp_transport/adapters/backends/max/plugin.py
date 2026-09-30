@@ -32,7 +32,7 @@ from xmpp_transport.domain.models import (
     Participant,
     ReplyReference,
 )
-from xmpp_transport.ports.backend import ContactSource, MessageSender, SendResult
+from xmpp_transport.ports.backend import ContactAdder, ContactSource, MessageSender, SendResult
 from xmpp_transport.ports.events import BackendEventSink
 
 from .models import MaxAuthorizationError, MaxChat, MaxContact, MaxIncomingMessage
@@ -65,6 +65,9 @@ class MaxClient(Protocol):
         ...
 
     async def list_contacts(self) -> list[MaxContact]:
+        ...
+
+    async def add_contact_by_phone(self, phone: str) -> MaxContact:
         ...
 
 
@@ -243,11 +246,16 @@ class MaxBackendSession:
         await self._publish_state(SessionState.STOPPED)
 
     def features(self) -> Mapping[type, object]:
-        return {MessageSender: self, ContactSource: self}
+        return {MessageSender: self, ContactSource: self, ContactAdder: self}
 
     async def contacts(self) -> Sequence[Contact]:
         contacts = await self._client.list_contacts()
         return tuple(self._contact(item) for item in contacts)
+
+    async def add_contact_by_phone(self, phone: str) -> Contact:
+        if not self._started or self._closed:
+            raise BackendUnavailable("MAX backend session is not active")
+        return self._contact(await self._client.add_contact_by_phone(phone))
 
     async def send_message(self, message: OutgoingMessage) -> SendResult:
         if not self._started or self._closed:

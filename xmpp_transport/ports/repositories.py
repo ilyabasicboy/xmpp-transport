@@ -45,6 +45,9 @@ class BindingRepository(Protocol):
     ) -> None:
         ...
 
+    async def disable_binding(self, binding_id: BindingId) -> None:
+        ...
+
 
 class CredentialCipher(Protocol):
     def decrypt(self, encrypted: bytes) -> bytes:

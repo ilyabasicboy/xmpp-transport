@@ -218,6 +218,12 @@ class SingleBackendRuntime:
             bindings,
             authentication,
             control_localpart=control_localpart,
+            sessions=sessions,
+            roster=roster,
+            contacts_page_size=_positive_int(
+                self._backend.options.get("contacts_page_size", "20"),
+                "contacts_page_size",
+            ),
         )
         gateway = XmppDirectMessageGateway(
             self._wire,
