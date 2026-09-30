@@ -182,6 +182,42 @@ class XmppGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], control.commands)
         self.assertIsNotNone(stanza.find("{{{}}}x".format(GROUPS_NS)))
 
+    async def test_routes_owner_group_fanout_before_control_handler(self) -> None:
+        control = FakeControl()
+        gateway = XmppDirectMessageGateway(
+            self.wire,
+            DirectRouteResolver(BackendId("telegram"), self.addresses, self.bindings),
+            self.addresses,
+            self.bindings,
+            self.router,  # type: ignore[arg-type]
+            XmppMessageCodec(),
+            control=control,  # type: ignore[arg-type]
+            transport_namespace="urn:xabber:transport:telegram:1",
+            server_domain="example.com",
+            group_localpart_prefix="telegramg",
+        )
+        stanza = ET.fromstring(
+            """
+            <message from='telegramg-75736572406578616d706c652e636f6d-888@example.com'
+                     to='bot@telegram.example.com' type='chat' id='group-client-1'>
+              <body>user@example.com:\nHello MAX group</body>
+              <x xmlns='https://xabber.com/protocol/groups'>
+                <user><jid xmlns=''>user@example.com/device</jid></user>
+              </x>
+            </message>
+            """
+        )
+
+        await gateway.handle_stanza(stanza)
+
+        self.assertEqual([], control.commands)
+        self.assertEqual(1, len(self.router.outgoing))
+        message = self.router.outgoing[0]
+        self.assertEqual(RemoteObjectId("888"), message.conversation_id)
+        self.assertEqual("Hello MAX group", message.text)
+        self.assertEqual("true", message.attributes["is_group"])
+        self.assertEqual([], self.wire.sent)
+
     async def test_missing_binding_returns_service_unavailable(self) -> None:
         self.bindings.record = None
         stanza = ET.fromstring(

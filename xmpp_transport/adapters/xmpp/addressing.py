@@ -94,6 +94,17 @@ class DirectRouteResolver:
             return None
         return DirectRoute(binding.binding_id, conversation_id, owner_bare_jid)
 
+    async def resolve_group(
+        self, owner_jid: str, conversation_id: RemoteObjectId
+    ) -> Optional[DirectRoute]:
+        owner_bare_jid = bare_jid(owner_jid)
+        binding = await self._bindings.binding_for_xmpp_account(
+            owner_bare_jid, self._backend_id
+        )
+        if binding is None:
+            return None
+        return DirectRoute(binding.binding_id, conversation_id, owner_bare_jid)
+
 
 def bare_jid(jid: str) -> str:
     bare = jid.split("/", 1)[0]

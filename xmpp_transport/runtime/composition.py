@@ -228,6 +228,8 @@ class SingleBackendRuntime:
             codec,
             control=control,
             transport_namespace=roster_namespace,
+            server_domain=server_domain,
+            group_localpart_prefix="{}g".format(self._backend.name),
         )
         application = ApplicationRuntime(
             self._health,

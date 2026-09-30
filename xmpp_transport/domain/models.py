@@ -102,6 +102,7 @@ class OutgoingMessage:
     text: Optional[str] = None
     media: Sequence[Media] = field(default_factory=tuple)
     reply_to: Optional[ReplyReference] = None
+    attributes: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.client_message_id:

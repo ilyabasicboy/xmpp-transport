@@ -161,6 +161,33 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         states = [event.state.value for event in self.sink.events if isinstance(event, SessionStateChanged)]
         self.assertEqual(["starting", "connected", "stopped"], states)
 
+    async def test_suppresses_MAX_echo_after_xabber_group_send(self) -> None:
+        await self.session.start()
+        sender = self.session.features()[MessageSender]
+        await sender.send_message(  # type: ignore[attr-defined]
+            OutgoingMessage(
+                client_message_id="group-client-1",
+                binding_id=BindingId("binding-1"),
+                conversation_id=RemoteObjectId("888"),
+                text="hello group",
+                attributes={"is_group": "true"},
+            )
+        )
+        await self.client.message_handler(  # type: ignore[misc]
+            MaxIncomingMessage(
+                sender_id="account",
+                text="hello group",
+                chat_id="888",
+                message_id="sent-1",
+                is_self=True,
+                is_group=True,
+            )
+        )
+
+        self.assertFalse(
+            any(isinstance(event, MessageReceived) for event in self.sink.events)
+        )
+
     async def test_publishes_incoming_message_and_authorization_loss(self) -> None:
         await self.session.start()
         await self.client.message_handler(  # type: ignore[misc]

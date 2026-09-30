@@ -208,6 +208,8 @@ class MaxBackendSession:
         self._client = client_factory(credentials)
         self._test_self_messages = test_self_messages
         self._group_chats = {}
+        self._pending_group_echoes = set()
+        self._sent_group_message_ids = set()
         self._started = False
         self._closed = False
 
@@ -254,6 +256,10 @@ class MaxBackendSession:
             raise InvalidCommand("message belongs to another binding")
         if message.media:
             raise FeatureUnavailable("MAX media sending is not connected yet")
+        group_echo = None
+        if message.attributes.get("is_group") == "true":
+            group_echo = (str(message.conversation_id), message.text or "")
+            self._pending_group_echoes.add(group_echo)
         try:
             payload = await self._client.send_message(
                 text=message.text or "",
@@ -263,15 +269,30 @@ class MaxBackendSession:
                 ),
             )
         except Exception as exc:
+            if group_echo is not None:
+                self._pending_group_echoes.discard(group_echo)
             raise BackendUnavailable("MAX message send failed") from exc
         response_message = payload.get("message") or {}
         remote_id = response_message.get("id")
         if remote_id is None:
+            if group_echo is not None:
+                self._pending_group_echoes.discard(group_echo)
             raise BackendUnavailable("MAX send response did not contain a message ID")
+        if group_echo is not None:
+            self._pending_group_echoes.discard(group_echo)
+            self._sent_group_message_ids.add(str(remote_id))
+            if len(self._sent_group_message_ids) > 2048:
+                self._sent_group_message_ids.pop()
         return SendResult(RemoteObjectId(str(remote_id)))
 
     async def _receive_message(self, message: MaxIncomingMessage) -> None:
         if not message.chat_id or not message.message_id:
+            return
+        if message.is_self and message.is_group and (
+            message.message_id in self._sent_group_message_ids
+            or (message.chat_id, message.text) in self._pending_group_echoes
+        ):
+            self._sent_group_message_ids.discard(message.message_id)
             return
         if message.is_self and (
             not message.is_group or not self._test_self_messages

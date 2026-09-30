@@ -1,11 +1,13 @@
 """Direct-message boundary between XEP-0114 wire traffic and the application."""
 
 import logging
+from dataclasses import replace
 from typing import Awaitable, Callable, Optional, Protocol
 from xml.etree import ElementTree as ET
 
 from xmpp_transport.application.message_router import MessageRouter
 from xmpp_transport.domain.errors import AuthorizationRequired, FeatureUnavailable, InvalidCommand
+from xmpp_transport.domain.identifiers import RemoteObjectId
 from xmpp_transport.domain.models import IncomingMessage
 from xmpp_transport.ports.repositories import BindingRepository
 
@@ -52,6 +54,8 @@ class XmppDirectMessageGateway:
         codec: XmppMessageCodec,
         control: Optional[ControlHandler] = None,
         transport_namespace: Optional[str] = None,
+        server_domain: Optional[str] = None,
+        group_localpart_prefix: Optional[str] = None,
     ) -> None:
         self._wire = wire
         self._routes = routes
@@ -61,6 +65,8 @@ class XmppDirectMessageGateway:
         self._codec = codec
         self._control = control
         self._transport_namespace = transport_namespace
+        self._server_domain = server_domain
+        self._group_localpart_prefix = group_localpart_prefix
         self._wire.set_message_handler(self.handle_stanza)
 
     async def start(self) -> None:
@@ -82,6 +88,20 @@ class XmppDirectMessageGateway:
                 else None
             )
             if fake_outgoing_tag and stanza.find(fake_outgoing_tag) is not None:
+                return
+            group_route = await self._group_route(stanza)
+            if group_route is not None:
+                route, body = group_route
+                message = self._codec.parse_outgoing(
+                    stanza, route.binding_id, route.conversation_id
+                )
+                await self._messages.send(
+                    replace(
+                        message,
+                        text=_strip_group_author_prefix(body),
+                        attributes={"is_group": "true"},
+                    )
+                )
                 return
             if self._control is not None and self._control.accepts(
                 stanza.attrib.get("to", "")
@@ -112,10 +132,51 @@ class XmppDirectMessageGateway:
             await self._send_error(stanza, XmppMessageError.SERVICE_UNAVAILABLE)
         except Exception as exc:
             log.error(
-                "XMPP direct message handling failed exception_type=%s",
+                "XMPP message handling failed exception_type=%s",
                 type(exc).__name__,
             )
             await self._send_error(stanza, XmppMessageError.SERVICE_UNAVAILABLE)
+
+    async def _group_route(self, stanza: ET.Element):  # type: ignore[no-untyped-def]
+        if not self._server_domain or not self._group_localpart_prefix:
+            return None
+        if self._control is None or not self._control.accepts(
+            stanza.attrib.get("to", "")
+        ):
+            return None
+        from_jid = stanza.attrib.get("from", "").split("/", 1)[0]
+        localpart, separator, domain = from_jid.partition("@")
+        prefix = self._group_localpart_prefix + "-"
+        if not separator or domain != self._server_domain or not localpart.startswith(prefix):
+            return None
+        payload = localpart[len(prefix) :]
+        owner_hex, separator, conversation_id = payload.partition("-")
+        if not separator or not owner_hex or not conversation_id:
+            return None
+        try:
+            owner_jid = bytes.fromhex(owner_hex).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        groups = stanza.find("{{{}}}x".format(GROUPS_NS))
+        user = (
+            groups.find("{{{}}}user".format(GROUPS_NS))
+            if groups is not None
+            else None
+        )
+        jid = user.find("jid") if user is not None else None
+        embedded_sender = (jid.text or "").strip().split("/", 1)[0] if jid is not None else ""
+        if embedded_sender != owner_jid:
+            return None
+        route = await self._routes.resolve_group(
+            owner_jid, RemoteObjectId(conversation_id)
+        )
+        if route is None:
+            return None
+        body = next(
+            ("".join(child.itertext()) for child in stanza if child.tag.rsplit("}", 1)[-1] == "body"),
+            "",
+        )
+        return route, body
 
     async def deliver_message(self, message: IncomingMessage) -> None:
         delivery = XmppMessageDelivery(
@@ -215,3 +276,13 @@ class XmppMessageDelivery:
             ) or "unknown"
             localpart = "{}-user-{}".format(self._member_fallback_prefix, safe)
         return "{}@{}".format(localpart, self._addresses.component_domain)
+
+
+def _strip_group_author_prefix(body: str) -> str:
+    if ":\n" not in body:
+        stripped = body.strip()
+        if "\n" not in body and stripped.endswith(":") and "@" in stripped:
+            return ""
+        return body
+    _author, text = body.split(":\n", 1)
+    return text
