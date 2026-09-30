@@ -7,7 +7,11 @@ from xmpp_transport.adapters.xmpp.addressing import ContactAddressCodec, DirectR
 from xmpp_transport.adapters.xmpp.component import ComponentSettings
 from xmpp_transport.adapters.xmpp.gateway import XmppDirectMessageGateway
 from xmpp_transport.adapters.xmpp.message_codec import XmppMessageCodec
-from xmpp_transport.adapters.xmpp.namespaces import CHAT_MARKERS_NS, STANZAS_NS
+from xmpp_transport.adapters.xmpp.namespaces import (
+    CHAT_MARKERS_NS,
+    GROUPS_NS,
+    STANZAS_NS,
+)
 from xmpp_transport.domain.errors import FeatureUnavailable
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
 from xmpp_transport.domain.models import IncomingMessage, OutgoingMessage
@@ -72,6 +76,18 @@ class FakeMessageRouter:
         return SendResult(RemoteObjectId("remote-result"))
 
 
+class FakeControl:
+    def __init__(self) -> None:
+        self.commands = []
+
+    def accepts(self, to_jid: str) -> bool:
+        return to_jid.split("/", 1)[0] == "bot@telegram.example.com"
+
+    async def handle(self, from_jid: str, command: str):  # type: ignore[no-untyped-def]
+        self.commands.append((from_jid, command))
+        raise AssertionError("group system message reached the control handler")
+
+
 def error_condition(stanza: ET.Element) -> str:
     error = stanza.find("error")
     assert error is not None
@@ -134,6 +150,37 @@ class XmppGatewayTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([], self.router.outgoing)
         self.assertEqual([], self.wire.sent)
+
+    async def test_ignores_xabber_group_system_message(self) -> None:
+        control = FakeControl()
+        gateway = XmppDirectMessageGateway(
+            self.wire,
+            DirectRouteResolver(BackendId("telegram"), self.addresses, self.bindings),
+            self.addresses,
+            self.bindings,
+            self.router,  # type: ignore[arg-type]
+            XmppMessageCodec(),
+            control=control,  # type: ignore[arg-type]
+            transport_namespace="urn:xabber:transport:telegram:1",
+        )
+        stanza = ET.fromstring(
+            """
+            <message from='maxg-owner-888@example.com'
+                     to='bot@telegram.example.com' type='chat' id='system-1'>
+              <body>MAX user 7 joined group chat.</body>
+              <x xmlns='https://xabber.com/protocol/groups'>
+                <system-message>user-joined</system-message>
+              </x>
+            </message>
+            """
+        )
+
+        await gateway.handle_stanza(stanza)
+
+        self.assertEqual([], self.router.outgoing)
+        self.assertEqual([], self.wire.sent)
+        self.assertEqual([], control.commands)
+        self.assertIsNotNone(stanza.find("{{{}}}x".format(GROUPS_NS)))
 
     async def test_missing_binding_returns_service_unavailable(self) -> None:
         self.bindings.record = None

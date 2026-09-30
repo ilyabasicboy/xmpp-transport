@@ -94,6 +94,19 @@ class XmppGroupManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("bot@max.example.com", wire.sent[0].attrib["from"])
         self.assertEqual("chat-99@max.example.com", wire.sent[2].attrib["from"])
 
+        await manager.ensure_group(
+            BindingId("binding-1"),
+            Conversation(
+                RemoteObjectId("-888"),
+                ConversationKind.GROUP,
+                "MAX Group",
+                participants=(Participant(RemoteObjectId("7"), "Alice"),),
+                attributes={"owner_remote_id": "100"},
+            ),
+        )
+        self.assertEqual(5, len(wire.requests))
+        self.assertEqual(4, len(wire.sent))
+
 
 if __name__ == "__main__":
     unittest.main()

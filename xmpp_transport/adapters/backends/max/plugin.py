@@ -207,6 +207,7 @@ class MaxBackendSession:
         self._event_sink = event_sink
         self._client = client_factory(credentials)
         self._test_self_messages = test_self_messages
+        self._group_chats = {}
         self._started = False
         self._closed = False
 
@@ -276,6 +277,17 @@ class MaxBackendSession:
             not message.is_group or not self._test_self_messages
         ):
             return
+        if message.is_group:
+            chat = self._group_chats.get(message.chat_id)
+            if chat is None:
+                chat = MaxChat(
+                    chat_id=message.chat_id,
+                    title=message.chat_title
+                    or "MAX group {}".format(message.chat_id),
+                    is_group=True,
+                    members=(),
+                )
+            await self._publish_group_conversation(chat)
         if message.is_group and not message.is_self:
             direct_chat_id = self._member_direct_chat_id(message.sender_id)
             if direct_chat_id is not None:
@@ -318,6 +330,7 @@ class MaxBackendSession:
 
     async def _receive_chat(self, chat: MaxChat) -> None:
         if chat.is_group:
+            self._group_chats[chat.chat_id] = chat
             for member in chat.members:
                 if member.user_id == self._credentials.account_id:
                     continue
@@ -338,29 +351,7 @@ class MaxBackendSession:
                         ),
                     )
                 )
-            await self._event_sink.publish(
-                ConversationChanged(
-                    envelope=self._envelope(ConversationChanged.EVENT_TYPE),
-                    conversation=Conversation(
-                        id=RemoteObjectId(chat.chat_id),
-                        kind=ConversationKind.GROUP,
-                        title=chat.title,
-                        participants=tuple(
-                            Participant(
-                                id=RemoteObjectId(member.user_id),
-                                display_name=member.title,
-                            )
-                            for member in chat.members
-                        ),
-                        avatar=(
-                            Avatar(chat.avatar.url, chat.avatar.avatar_id)
-                            if chat.avatar is not None
-                            else None
-                        ),
-                        attributes={"owner_remote_id": self._credentials.account_id},
-                    ),
-                )
-            )
+            await self._publish_group_conversation(chat)
             return
         await self._event_sink.publish(
             ContactChanged(
@@ -375,6 +366,31 @@ class MaxBackendSession:
                     ),
                 ),
                 force=chat.force_roster_sync,
+            )
+        )
+
+    async def _publish_group_conversation(self, chat: MaxChat) -> None:
+        await self._event_sink.publish(
+            ConversationChanged(
+                envelope=self._envelope(ConversationChanged.EVENT_TYPE),
+                conversation=Conversation(
+                    id=RemoteObjectId(chat.chat_id),
+                    kind=ConversationKind.GROUP,
+                    title=chat.title,
+                    participants=tuple(
+                        Participant(
+                            id=RemoteObjectId(member.user_id),
+                            display_name=member.title,
+                        )
+                        for member in chat.members
+                    ),
+                    avatar=(
+                        Avatar(chat.avatar.url, chat.avatar.avatar_id)
+                        if chat.avatar is not None
+                        else None
+                    ),
+                    attributes={"owner_remote_id": self._credentials.account_id},
+                ),
             )
         )
 

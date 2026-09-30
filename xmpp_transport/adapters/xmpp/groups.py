@@ -37,6 +37,7 @@ class XmppGroupManager:
         self._group_localpart_prefix = group_localpart_prefix
         self._provider_label = provider_label
         self._ensured_members = set()
+        self._ensured_groups = {}
 
     async def ensure_group(
         self, binding_id: BindingId, conversation: Conversation
@@ -46,6 +47,15 @@ class XmppGroupManager:
             raise LookupError("active XMPP account not found for group synchronization")
         localpart = self._group_localpart(owner_jid, str(conversation.id))
         group_jid = "{}@{}".format(localpart, self._server_domain)
+        signature = (
+            conversation.title,
+            tuple(
+                (str(participant.id), participant.display_name)
+                for participant in conversation.participants
+            ),
+        )
+        if self._ensured_groups.get((owner_jid, group_jid)) == signature:
+            return
         create = ET.Element("{{{}}}create".format(GROUPS_NS))
         group = ET.SubElement(create, "group", {"privacy": "public"})
         ET.SubElement(group, "localpart").text = localpart
@@ -93,6 +103,7 @@ class XmppGroupManager:
                 or "{} user {}".format(self._provider_label, participant.id),
                 auto_join=True,
             )
+        self._ensured_groups[(owner_jid, group_jid)] = signature
 
     async def _ensure_member(
         self,

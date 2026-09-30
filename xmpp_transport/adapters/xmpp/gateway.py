@@ -12,6 +12,7 @@ from xmpp_transport.ports.repositories import BindingRepository
 from .addressing import ContactAddressCodec, DirectRouteResolver, InvalidXmppAddress
 from .auth_commands import ControlResponse
 from .message_codec import XmppMessageCodec, XmppMessageError
+from .namespaces import GROUPS_NS
 
 
 log = logging.getLogger(__name__)
@@ -70,6 +71,11 @@ class XmppDirectMessageGateway:
 
     async def handle_stanza(self, stanza: ET.Element) -> None:
         try:
+            groups = stanza.find("{{{}}}x".format(GROUPS_NS))
+            if groups is not None and groups.find(
+                "{{{}}}system-message".format(GROUPS_NS)
+            ) is not None:
+                return
             fake_outgoing_tag = (
                 "{{{}}}fake-outgoing".format(self._transport_namespace)
                 if self._transport_namespace

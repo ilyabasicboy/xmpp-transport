@@ -231,6 +231,12 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         messages = [
             event for event in self.sink.events if isinstance(event, MessageReceived)
         ]
+        conversations = [
+            event
+            for event in self.sink.events
+            if isinstance(event, ConversationChanged)
+        ]
+        self.assertEqual(1, len(conversations))
         self.assertEqual(1, len(messages))
         self.assertEqual("true", messages[0].message.attributes["is_self"])
         self.assertEqual("true", messages[0].message.attributes["is_group"])
@@ -277,13 +283,14 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         relevant = [
             event
             for event in self.sink.events
-            if isinstance(event, (ContactChanged, MessageReceived))
+            if isinstance(event, (ConversationChanged, ContactChanged, MessageReceived))
         ]
-        self.assertIsInstance(relevant[0], ContactChanged)
-        self.assertEqual(RemoteObjectId("99"), relevant[0].contact.id)
-        self.assertIsInstance(relevant[1], MessageReceived)
+        self.assertIsInstance(relevant[0], ConversationChanged)
+        self.assertIsInstance(relevant[1], ContactChanged)
+        self.assertEqual(RemoteObjectId("99"), relevant[1].contact.id)
+        self.assertIsInstance(relevant[2], MessageReceived)
         self.assertEqual(
-            "100", relevant[1].message.attributes["owner_remote_id"]
+            "100", relevant[2].message.attributes["owner_remote_id"]
         )
 
     async def test_publishes_direct_snapshot_chat_as_roster_contact(self) -> None:
