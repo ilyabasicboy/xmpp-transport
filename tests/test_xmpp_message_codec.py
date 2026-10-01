@@ -23,12 +23,19 @@ from xmpp_transport.adapters.xmpp.auth_commands import (
 from xmpp_transport.domain.errors import InvalidCommand
 from xmpp_transport.domain.identifiers import BindingId, RemoteObjectId
 from xmpp_transport.domain.models import (
+    ForwardReference,
     IncomingMessage,
     Media,
     MediaKind,
     MessageButton,
     ReplyReference,
 )
+
+
+def _escaped_length(value: str) -> int:
+    from html import escape
+
+    return len(escape(value, quote=False).encode("utf-16-le")) // 2
 
 
 def tag(namespace: str, name: str) -> str:
@@ -137,6 +144,32 @@ https://xabber.example/upload/photo.jpg</body>
         self.assertTrue(message.media[0].voice)
         self.assertEqual(3, message.media[0].duration)
 
+    def test_parses_xabber_forward_reference(self) -> None:
+        fallback = "> chat-11@max.example:\n> Forwarded text\n"
+        stanza = ET.fromstring(
+            """
+            <message type='chat' id='forward-1' to='chat-22@max.example'>
+              <body>{fallback}comment</body>
+              <reference xmlns='https://xabber.com/protocol/references'
+                         type='mutable' begin='0' end='{end}'>
+                <forwarded xmlns='urn:xmpp:forward:0'>
+                  <message xmlns='jabber:client' from='chat-11@max.example'
+                           to='user@example' id='116974846586354125'>
+                    <body>Forwarded text</body>
+                  </message>
+                </forwarded>
+              </reference>
+            </message>
+            """.format(fallback=fallback, end=_escaped_length(fallback))
+        )
+        message = self.codec.parse_outgoing(stanza, self.binding_id, self.conversation_id)
+        self.assertEqual("comment", message.text)
+        self.assertEqual("chat-11@max.example", message.forwarded_from.source_name)
+        self.assertEqual(
+            RemoteObjectId("116974846586354125"),
+            message.forwarded_from.source_message_id,
+        )
+
     def test_rejects_empty_body(self) -> None:
         stanza = ET.fromstring("<message type='chat' id='1'><body> </body></message>")
         with self.assertRaises(InvalidCommand):
@@ -159,6 +192,30 @@ https://xabber.example/upload/photo.jpg</body>
 class SerializeIncomingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.codec = XmppMessageCodec()
+
+    def test_serializes_incoming_max_forward_reference(self) -> None:
+        message = IncomingMessage(
+            id=RemoteObjectId("outer-1"),
+            binding_id=BindingId("binding-1"),
+            conversation_id=RemoteObjectId("22"),
+            sender_id=RemoteObjectId("33"),
+            occurred_at=datetime.now(timezone.utc),
+            text="comment",
+            forwarded_from=ForwardReference(
+                source_message_id=RemoteObjectId("inner-1"),
+                source_conversation_id=RemoteObjectId("11"),
+                sender_id=RemoteObjectId("44"),
+                body="Forwarded text",
+            ),
+        )
+        stanza = self.codec.serialize_incoming(
+            message, "chat-33@max.example", "user@example"
+        )
+        reference = stanza.find(tag("https://xabber.com/protocol/references", "reference"))
+        forwarded = reference.find(tag("urn:xmpp:forward:0", "forwarded"))
+        inner = forwarded.find(tag("jabber:client", "message"))
+        self.assertEqual("inner-1", inner.attrib["id"])
+        self.assertEqual("Forwarded text", inner.findtext(tag("jabber:client", "body")))
 
     def test_serializes_body_origin_reply_and_utc_delay(self) -> None:
         message = IncomingMessage(

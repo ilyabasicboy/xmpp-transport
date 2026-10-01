@@ -24,7 +24,7 @@ from xmpp_transport.domain.events import (
     SessionStateChanged,
 )
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
-from xmpp_transport.domain.models import Media, MediaKind, OutgoingMessage
+from xmpp_transport.domain.models import ForwardReference, Media, MediaKind, OutgoingMessage
 from xmpp_transport.ports.backend import ButtonActions, ContactAdder, ContactSource, MessageSender
 
 
@@ -45,6 +45,7 @@ class MaxClient:
         self.closed = 0
         self.sent = []
         self.callbacks = []
+        self.forwards = []
 
     def set_message_handler(self, handler) -> None:  # type: ignore[no-untyped-def]
         self.message_handler = handler
@@ -62,9 +63,10 @@ class MaxClient:
         self.closed += 1
 
     async def send_message(  # type: ignore[no-untyped-def]
-        self, text, chat_id=None, reply_to_message_id=None, media=()
+        self, text, chat_id=None, reply_to_message_id=None, media=(), forward_reference=None
     ):
         self.sent.append((text, chat_id, reply_to_message_id, media))
+        self.forwards.append(forward_reference)
         return {"message": {"id": "sent-1"}}
 
     async def list_contacts(self):  # type: ignore[no-untyped-def]
@@ -194,6 +196,24 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("", self.client.sent[0][0])
         self.assertEqual((media,), self.client.sent[0][3])
+
+    async def test_sends_xabber_forward_as_native_max_forward(self) -> None:
+        await self.session.start()
+        await self.session.send_message(
+            OutgoingMessage(
+                client_message_id="client-forward-1",
+                binding_id=BindingId("binding-1"),
+                conversation_id=RemoteObjectId("22"),
+                text="fallback",
+                forwarded_from=ForwardReference(
+                    source_name="chat-11@max.example",
+                    source_message_id=RemoteObjectId("116974846586354125"),
+                ),
+            )
+        )
+        self.assertEqual("", self.client.sent[0][0])
+        self.assertEqual("11", self.client.forwards[0].source_chat_id)
+        self.assertEqual("116974846586354125", self.client.forwards[0].message_id)
 
     async def test_suppresses_MAX_echo_after_xabber_group_send(self) -> None:
         await self.session.start()

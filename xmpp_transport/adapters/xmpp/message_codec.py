@@ -19,6 +19,7 @@ from xmpp_transport.domain.errors import InvalidCommand
 from xmpp_transport.domain.identifiers import BindingId, RemoteObjectId
 from xmpp_transport.domain.models import (
     IncomingMessage,
+    ForwardReference,
     Media,
     MediaKind,
     MessageButton,
@@ -34,6 +35,7 @@ from .namespaces import (
     DELAY_NS,
     DATA_FORMS_NS,
     FILES_NS,
+    FORWARDED_NS,
     REPLY_NS,
     SID_NS,
     STANZAS_NS,
@@ -71,14 +73,19 @@ class XmppMessageCodec:
 
         client_message_id = self._client_message_id(element)
         body = self._body(element)
+        forwarded_from, forward_range = self._outgoing_forward(element)
+        if forward_range is not None:
+            body = _strip_escaped_ranges(body, (forward_range,)).strip()
         media = self._outgoing_media(element, body)
+        if forwarded_from is not None:
+            media = tuple(forwarded_from.media)
         for item in media:
             if item.source_url:
                 body = "\n".join(
                     line for line in body.splitlines() if line.strip() != item.source_url
                 )
         body = body.strip()
-        if not body and not media:
+        if not body and not media and forwarded_from is None:
             raise InvalidCommand("message must contain text or media")
         reply = self._reply(element)
         return OutgoingMessage(
@@ -88,6 +95,7 @@ class XmppMessageCodec:
             text=body or None,
             media=media,
             reply_to=reply,
+            forwarded_from=forwarded_from,
         )
 
     def serialize_incoming(
@@ -106,7 +114,11 @@ class XmppMessageCodec:
                 "id": message_id,
             },
         )
-        body, media_ranges = self._body_with_media(message.text or "", message.media)
+        body, forward_range = self._body_with_forward(
+            message.text or "", message.forwarded_from, from_jid, to_jid
+        )
+        outer_media = () if message.forwarded_from is not None else message.media
+        body, media_ranges = self._body_with_media(body, outer_media)
         body, button_range = self._body_with_buttons(body, message.buttons)
         if body and len(body) > self.MAX_BODY_LENGTH:
             raise ValueError("incoming text message body is too large")
@@ -126,9 +138,82 @@ class XmppMessageCodec:
         ET.SubElement(element, _tag(DELAY_NS, "delay"), {"stamp": stamp})
         for media, begin, end in media_ranges:
             self._append_media_reference(element, media, begin, end)
+        if forward_range is not None and message.forwarded_from is not None:
+            self._append_forward_reference(
+                element,
+                message.forwarded_from,
+                forward_range,
+                from_jid,
+                to_jid,
+            )
         if button_range is not None:
             self._append_message_keyboard(element, message.buttons, button_range)
         return element
+
+    def _body_with_forward(
+        self,
+        body: str,
+        reference: Optional[ForwardReference],
+        from_jid: str,
+        to_jid: str,
+    ) -> tuple[str, Optional[tuple[int, int]]]:
+        if reference is None:
+            return body, None
+        sender, _recipient = self._forward_addresses(reference, from_jid, to_jid)
+        parts = []
+        if reference.body:
+            parts.append(reference.body.strip())
+        for media in reference.media:
+            if media.source_url and media.source_url not in parts:
+                parts.append(media.source_url)
+        quoted = "\n".join("> {}".format(line) if line else ">" for line in "\n".join(parts).splitlines())
+        fallback = "> {}:\n{}\n".format(sender, quoted)
+        return fallback + body, (0, _escaped_text_length(fallback))
+
+    def _append_forward_reference(
+        self,
+        element: ET.Element,
+        reference: ForwardReference,
+        body_range: tuple[int, int],
+        from_jid: str,
+        to_jid: str,
+    ) -> None:
+        sender, recipient = self._forward_addresses(reference, from_jid, to_jid)
+        outer = ET.SubElement(
+            element,
+            _tag(XABBER_REFERENCES_NS, "reference"),
+            {"type": "mutable", "begin": str(body_range[0]), "end": str(body_range[1])},
+        )
+        forwarded = ET.SubElement(outer, _tag(FORWARDED_NS, "forwarded"))
+        message_id = str(reference.source_message_id or "")
+        inner = ET.SubElement(
+            forwarded,
+            _tag(CLIENT_NS, "message"),
+            {"from": sender, "to": recipient, "type": "chat", "id": message_id},
+        )
+        if message_id:
+            ET.SubElement(inner, _tag(SID_NS, "origin-id"), {"id": message_id})
+        inner_body, ranges = self._body_with_media(reference.body or "", reference.media)
+        ET.SubElement(inner, _tag(CLIENT_NS, "body")).text = inner_body
+        for media, begin, end in ranges:
+            self._append_media_reference(inner, media, begin, end)
+
+    @staticmethod
+    def _forward_addresses(
+        reference: ForwardReference, from_jid: str, to_jid: str
+    ) -> tuple[str, str]:
+        domain = from_jid.split("@", 1)[-1]
+        sender = reference.source_name or (
+            to_jid
+            if reference.is_self
+            else "chat-{}@{}".format(reference.sender_id or "unknown", domain)
+        )
+        recipient = reference.source_recipient or (
+            "chat-{}@{}".format(reference.source_conversation_id, domain)
+            if reference.source_conversation_id is not None
+            else to_jid
+        )
+        return sender, recipient
 
     def _body_with_buttons(
         self, body: str, buttons  # type: ignore[no-untyped-def]
@@ -448,6 +533,58 @@ class XmppMessageCodec:
                 result.append(item)
         return tuple(result)
 
+    def _outgoing_forward(
+        self, element: ET.Element
+    ) -> tuple[Optional[ForwardReference], Optional[tuple[int, int]]]:
+        outer_to = element.attrib.get("to", "").split("/", 1)[0]
+        for reference in element:
+            if reference.tag != _tag(XABBER_REFERENCES_NS, "reference"):
+                continue
+            forwarded = _child(reference, "forwarded", FORWARDED_NS)
+            if forwarded is None:
+                continue
+            inner = _child(forwarded, "message", CLIENT_NS)
+            if inner is None:
+                inner = _child(forwarded, "message")
+            if inner is None:
+                continue
+            inner_from = inner.attrib.get("from", "").split("/", 1)[0]
+            inner_to = inner.attrib.get("to", "").split("/", 1)[0]
+            if not outer_to or outer_to in (inner_from, inner_to):
+                continue
+            inner_body = self._body_text(inner)
+            media = self._outgoing_media(inner, inner_body)
+            for item in media:
+                if item.source_url:
+                    inner_body = "\n".join(
+                        line
+                        for line in inner_body.splitlines()
+                        if line.strip() != item.source_url
+                    )
+            origin = inner.find(_tag(SID_NS, "origin-id"))
+            message_id = inner.attrib.get("id") or (
+                origin.attrib.get("id") if origin is not None else None
+            )
+            body_range = _reference_range(reference)
+            return (
+                ForwardReference(
+                    source_name=inner_from or None,
+                    source_recipient=inner_to or None,
+                    source_message_id=(RemoteObjectId(message_id) if message_id else None),
+                    body=inner_body.strip() or None,
+                    media=media,
+                ),
+                body_range,
+            )
+        return None, None
+
+    @staticmethod
+    def _body_text(element: ET.Element) -> str:
+        for child in element:
+            if _local_name(child.tag) == "body":
+                return "".join(child.itertext())
+        return ""
+
     @staticmethod
     def _media_from_file_sharing(
         sharing: Optional[ET.Element], voice: bool
@@ -562,6 +699,41 @@ def _media_kind(content_type: str, voice: bool) -> MediaKind:
     if content_type.startswith("video/"):
         return MediaKind.VIDEO
     return MediaKind.FILE
+
+
+def _reference_range(element: ET.Element) -> Optional[tuple[int, int]]:
+    begin = _nonnegative_int(element.attrib.get("begin"))
+    end = _nonnegative_int(element.attrib.get("end"))
+    if begin is None or end is None or end < begin:
+        return None
+    return begin, end
+
+
+def _nonnegative_int(value: object) -> Optional[int]:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _strip_escaped_ranges(body: str, ranges) -> str:  # type: ignore[no-untyped-def]
+    result = []
+    escaped_offset = 0
+    sorted_ranges = sorted(ranges)
+    range_index = 0
+    for character in body:
+        next_offset = escaped_offset + _escaped_text_length(character)
+        while range_index < len(sorted_ranges) and escaped_offset >= sorted_ranges[range_index][1]:
+            range_index += 1
+        if not (
+            range_index < len(sorted_ranges)
+            and escaped_offset >= sorted_ranges[range_index][0]
+            and next_offset <= sorted_ranges[range_index][1]
+        ):
+            result.append(character)
+        escaped_offset = next_offset
+    return "".join(result)
 
 
 def _local_name(tag: str) -> str:

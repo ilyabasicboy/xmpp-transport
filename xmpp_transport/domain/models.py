@@ -84,6 +84,12 @@ class ReplyReference:
 class ForwardReference:
     source_name: Optional[str] = None
     source_message_id: Optional[RemoteObjectId] = None
+    source_conversation_id: Optional[RemoteObjectId] = None
+    sender_id: Optional[RemoteObjectId] = None
+    body: Optional[str] = None
+    media: Sequence[Media] = field(default_factory=tuple)
+    source_recipient: Optional[str] = None
+    is_self: bool = False
 
 
 @dataclass(frozen=True)
@@ -117,10 +123,11 @@ class OutgoingMessage:
     text: Optional[str] = None
     media: Sequence[Media] = field(default_factory=tuple)
     reply_to: Optional[ReplyReference] = None
+    forwarded_from: Optional[ForwardReference] = None
     attributes: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.client_message_id:
             raise ValueError("client_message_id must not be empty")
-        if not self.text and not self.media:
-            raise ValueError("an outgoing message must contain text or media")
+        if not self.text and not self.media and self.forwarded_from is None:
+            raise ValueError("an outgoing message must contain text, media, or a forward")

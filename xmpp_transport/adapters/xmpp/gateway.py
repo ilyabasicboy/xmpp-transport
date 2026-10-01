@@ -269,6 +269,7 @@ class XmppMessageDelivery:
                 if is_self
                 else self._group_member_jid(message)
             )
+            message = self._with_forward_addresses(message, owner_jid, group_jid)
             stanza = self._codec.serialize_group_message(
                 message,
                 sender_jid,
@@ -279,8 +280,42 @@ class XmppMessageDelivery:
             await self._wire.send(stanza)
             return
         sender_jid = self._addresses.contact_jid(message.conversation_id)
+        message = self._with_forward_addresses(message, owner_jid, owner_jid)
         stanza = self._codec.serialize_incoming(message, sender_jid, owner_jid)
         await self._wire.send(stanza)
+
+    def _with_forward_addresses(
+        self, message: IncomingMessage, owner_jid: str, fallback_recipient: str
+    ) -> IncomingMessage:
+        reference = message.forwarded_from
+        if reference is None or reference.source_name:
+            return message
+        sender_jid = owner_jid if reference.is_self else None
+        if sender_jid is None and message.attributes.get("is_group") == "true":
+            owner_remote_id = message.attributes.get("owner_remote_id", "")
+            try:
+                direct_chat_id = str(int(owner_remote_id) ^ int(str(reference.sender_id)))
+            except (TypeError, ValueError):
+                direct_chat_id = ""
+            if direct_chat_id:
+                sender_jid = self._addresses.contact_jid(RemoteObjectId(direct_chat_id))
+        if sender_jid is None and reference.source_conversation_id is not None:
+            sender_jid = self._addresses.contact_jid(reference.source_conversation_id)
+        sender_jid = sender_jid or fallback_recipient
+        recipient = fallback_recipient
+        if (
+            reference.source_conversation_id is not None
+            and reference.source_conversation_id != message.conversation_id
+        ):
+            recipient = self._addresses.contact_jid(reference.source_conversation_id)
+        return replace(
+            message,
+            forwarded_from=replace(
+                reference,
+                source_name=sender_jid,
+                source_recipient=recipient,
+            ),
+        )
 
     def _group_member_jid(self, message: IncomingMessage) -> str:
         owner_remote_id = message.attributes.get("owner_remote_id", "")

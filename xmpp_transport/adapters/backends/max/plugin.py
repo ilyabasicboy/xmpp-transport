@@ -28,6 +28,7 @@ from xmpp_transport.domain.models import (
     Contact,
     Conversation,
     ConversationKind,
+    ForwardReference,
     IncomingMessage,
     MessageButton,
     Media,
@@ -45,7 +46,14 @@ from xmpp_transport.ports.backend import (
 )
 from xmpp_transport.ports.events import BackendEventSink
 
-from .models import MaxAuthorizationError, MaxChat, MaxContact, MaxIncomingMessage, MaxMedia
+from .models import (
+    MaxAuthorizationError,
+    MaxChat,
+    MaxContact,
+    MaxForwardReference,
+    MaxIncomingMessage,
+    MaxMedia,
+)
 
 
 class MaxClient(Protocol):
@@ -72,6 +80,7 @@ class MaxClient(Protocol):
         chat_id: Optional[str] = None,
         reply_to_message_id: Optional[str] = None,
         media: tuple[object, ...] = (),
+        forward_reference: Optional[MaxForwardReference] = None,
     ) -> dict:
         ...
 
@@ -312,13 +321,15 @@ class MaxBackendSession:
             group_echo = (str(message.conversation_id), message.text or "")
             self._pending_group_echoes.add(group_echo)
         try:
+            forward_reference = self._max_forward_reference(message.forwarded_from)
             payload = await self._client.send_message(
-                text=message.text or "",
+                text=(message.text or "") if forward_reference is None else "",
                 chat_id=str(message.conversation_id),
                 reply_to_message_id=(
                     str(message.reply_to.message_id) if message.reply_to is not None else None
                 ),
-                media=tuple(message.media),
+                media=tuple(message.media) if forward_reference is None else (),
+                forward_reference=forward_reference,
             )
         except Exception as exc:
             if group_echo is not None:
@@ -379,6 +390,7 @@ class MaxBackendSession:
             if message.reply_to_message_id
             else None
         )
+        forwarded_from = self._forward_reference(message)
         await self._event_sink.publish(
             MessageReceived(
                 envelope=self._envelope(MessageReceived.EVENT_TYPE),
@@ -388,7 +400,11 @@ class MaxBackendSession:
                     conversation_id=RemoteObjectId(message.chat_id),
                     sender_id=RemoteObjectId(message.sender_id),
                     occurred_at=datetime.now(timezone.utc),
-                    text=message.text or None,
+                    text=(
+                        self._outer_text(message)
+                        if forwarded_from is not None
+                        else message.text or None
+                    ),
                     reply_to=reply,
                     buttons=tuple(
                         tuple(
@@ -403,6 +419,7 @@ class MaxBackendSession:
                         for row in message.buttons
                     ),
                     media=tuple(self._media(item) for item in message.media),
+                    forwarded_from=forwarded_from,
                     attributes={
                         "is_group": "true" if message.is_group else "false",
                         "is_self": "true" if message.is_self else "false",
@@ -413,6 +430,54 @@ class MaxBackendSession:
                 ),
             )
         )
+
+    def _forward_reference(self, message: MaxIncomingMessage) -> Optional[ForwardReference]:
+        raw_message = (message.raw or {}).get("message") or {}
+        link = raw_message.get("link") or {} if isinstance(raw_message, dict) else {}
+        if not isinstance(link, dict) or str(link.get("type") or "").upper() != "FORWARD":
+            return None
+        linked = link.get("message") or {}
+        if not isinstance(linked, dict) or linked.get("sender") is None:
+            return None
+        source_chat_id = link.get("chatId") or message.chat_id
+        return ForwardReference(
+            source_message_id=RemoteObjectId(str(linked.get("id") or message.message_id)),
+            source_conversation_id=(
+                RemoteObjectId(str(source_chat_id)) if source_chat_id is not None else None
+            ),
+            sender_id=RemoteObjectId(str(linked["sender"])),
+            body=str(linked.get("text") or "").strip() or None,
+            media=tuple(self._media(item) for item in message.media),
+            is_self=str(linked["sender"]) == self._credentials.account_id,
+        )
+
+    @staticmethod
+    def _outer_text(message: MaxIncomingMessage) -> Optional[str]:
+        raw_message = (message.raw or {}).get("message") or {}
+        if not isinstance(raw_message, dict):
+            return None
+        return str(raw_message.get("text") or "").strip() or None
+
+    @staticmethod
+    def _max_forward_reference(
+        reference: Optional[ForwardReference],
+    ) -> Optional[MaxForwardReference]:
+        if reference is None or reference.source_message_id is None:
+            return None
+        for jid in (reference.source_name, reference.source_recipient):
+            chat_id = MaxBackendSession._chat_id_from_forward_jid(jid or "")
+            if chat_id is not None:
+                return MaxForwardReference(chat_id, str(reference.source_message_id))
+        return None
+
+    @staticmethod
+    def _chat_id_from_forward_jid(jid: str) -> Optional[str]:
+        localpart = jid.split("@", 1)[0]
+        if localpart.startswith("chat-"):
+            return localpart[5:] or None
+        if localpart.startswith("maxg-") and "-" in localpart[5:]:
+            return localpart.rsplit("-", 1)[-1] or None
+        return None
 
     async def _receive_chat(self, chat: MaxChat) -> None:
         if chat.is_group:
