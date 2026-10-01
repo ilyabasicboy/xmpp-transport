@@ -19,7 +19,7 @@ from xmpp_transport.adapters.xmpp.auth_commands import (
 )
 from xmpp_transport.domain.errors import InvalidCommand
 from xmpp_transport.domain.identifiers import BindingId, RemoteObjectId
-from xmpp_transport.domain.models import IncomingMessage, ReplyReference
+from xmpp_transport.domain.models import IncomingMessage, MessageButton, ReplyReference
 
 
 def tag(namespace: str, name: str) -> str:
@@ -144,6 +144,28 @@ class SerializeIncomingTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             self.codec.serialize_incoming(message, "", "user@example.com")
+
+    def test_serializes_max_message_buttons_with_callback_fallback(self) -> None:
+        message = IncomingMessage(
+            id=RemoteObjectId("remote-message-1"),
+            binding_id=BindingId("binding-1"),
+            conversation_id=RemoteObjectId("conversation-1"),
+            sender_id=RemoteObjectId("sender-1"),
+            occurred_at=datetime.now(timezone.utc),
+            text="Confirm?",
+            buttons=((MessageButton("OK", "confirm", "callback-1"),),),
+        )
+
+        stanza = self.codec.serialize_incoming(
+            message, "chat-1@max.example.com", "user@example.com"
+        )
+
+        self.assertIn("/confirm - OK", stanza.findtext("body"))
+        button = stanza.find(".//{{{}}}button".format(BOT_UI_NS))
+        self.assertEqual(
+            {"id": "confirm", "type": "callback", "label": "OK", "data": "confirm"},
+            button.attrib,
+        )
 
     def test_builds_client_safe_error_without_reflecting_body(self) -> None:
         request = ET.fromstring(

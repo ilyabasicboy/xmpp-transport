@@ -81,6 +81,14 @@ class ForwardReference:
 
 
 @dataclass(frozen=True)
+class MessageButton:
+    text: str
+    payload: str
+    callback_id: Optional[str] = None
+    kind: str = "CALLBACK"
+
+
+@dataclass(frozen=True)
 class IncomingMessage:
     id: RemoteObjectId
     binding_id: BindingId
@@ -91,6 +99,7 @@ class IncomingMessage:
     media: Sequence[Media] = field(default_factory=tuple)
     reply_to: Optional[ReplyReference] = None
     forwarded_from: Optional[ForwardReference] = None
+    buttons: Sequence[Sequence[MessageButton]] = field(default_factory=tuple)
     attributes: Mapping[str, str] = field(default_factory=dict)
 
 

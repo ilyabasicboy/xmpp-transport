@@ -1,14 +1,20 @@
 """Provider-neutral inbound and outbound direct-message routing."""
 
 import asyncio
+import re
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Dict, Hashable, Tuple
 
 from xmpp_transport.domain.errors import FeatureUnavailable
 from xmpp_transport.domain.events import MessageReceived
-from xmpp_transport.domain.identifiers import BindingId
-from xmpp_transport.domain.models import OutgoingMessage
-from xmpp_transport.ports.backend import BackendFeatureProvider, MessageSender, SendResult
+from xmpp_transport.domain.identifiers import BindingId, RemoteObjectId
+from xmpp_transport.domain.models import MessageButton, OutgoingMessage
+from xmpp_transport.ports.backend import (
+    BackendFeatureProvider,
+    ButtonActions,
+    MessageSender,
+    SendResult,
+)
 from xmpp_transport.ports.repositories import MessageMappingRepository
 from xmpp_transport.ports.xmpp import XmppMessageSink
 
@@ -39,6 +45,8 @@ class _KeyedLocks:
 
 
 class MessageRouter:
+    BUTTON_COMMAND_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
+
     def __init__(
         self,
         features: BackendFeatureProvider,
@@ -49,6 +57,7 @@ class MessageRouter:
         self._mappings = mappings
         self._xmpp = xmpp
         self._locks = _KeyedLocks()
+        self._buttons: Dict[Tuple[BindingId, RemoteObjectId, str], MessageButton] = {}
 
     async def send(self, message: OutgoingMessage) -> SendResult:
         """Send once per binding/client ID and persist the provider mapping."""
@@ -84,8 +93,61 @@ class MessageRouter:
             if await self._mappings.incoming_delivered(message.binding_id, message.id):
                 return False
             await self._xmpp.deliver_message(message)
+            self._remember_buttons(message)
             await self._mappings.mark_incoming_delivered(message.binding_id, message.id)
             return True
+
+    async def activate_button(
+        self,
+        binding_id: BindingId,
+        conversation_id: RemoteObjectId,
+        value: str,
+    ) -> bool:
+        normalized = value.strip()
+        button = self._buttons.get((binding_id, conversation_id, normalized))
+        if button is None and normalized.startswith("/"):
+            command = normalized[1:].split(maxsplit=1)[0].strip()
+            button = self._buttons.get((binding_id, conversation_id, command))
+        if button is None:
+            return False
+        if not button.callback_id:
+            raise FeatureUnavailable(
+                "MAX button callback identifier is unavailable"
+            )
+        actions = await self._features.feature(binding_id, ButtonActions)
+        if actions is None:
+            raise FeatureUnavailable("active binding does not provide button actions")
+        await actions.activate_button(
+            conversation_id,
+            button.callback_id,
+            button.payload,
+            button.kind,
+        )
+        return True
+
+    def _remember_buttons(self, message) -> None:  # type: ignore[no-untyped-def]
+        if not message.buttons or message.attributes.get("is_group") == "true":
+            return
+        prefix = (message.binding_id, message.conversation_id)
+        for key in [key for key in self._buttons if key[:2] == prefix]:
+            self._buttons.pop(key, None)
+        for row_index, row in enumerate(message.buttons):
+            for button_index, button in enumerate(row):
+                payload = button.payload.strip()
+                if not payload:
+                    continue
+                command = self._button_command(button, row_index, button_index)
+                self._buttons[(prefix[0], prefix[1], command)] = button
+                self._buttons[(prefix[0], prefix[1], payload)] = button
+
+    @classmethod
+    def _button_command(
+        cls, button: MessageButton, row_index: int, button_index: int
+    ) -> str:
+        payload = button.payload.strip()
+        if cls.BUTTON_COMMAND_RE.fullmatch(payload):
+            return payload
+        return "button_{}_{}".format(row_index + 1, button_index + 1)
 
     @staticmethod
     def _validate_envelope(event: MessageReceived) -> None:

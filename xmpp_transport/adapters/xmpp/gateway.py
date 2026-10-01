@@ -129,9 +129,22 @@ class XmppDirectMessageGateway:
             if route is None:
                 await self._send_error(stanza, XmppMessageError.SERVICE_UNAVAILABLE)
                 return
+            callback = stanza.find("{{{}}}callback".format(BOT_UI_NS))
+            if callback is not None and callback.attrib.get("data"):
+                if not await self._messages.activate_button(
+                    route.binding_id,
+                    route.conversation_id,
+                    callback.attrib["data"],
+                ):
+                    raise InvalidCommand("unknown message button callback")
+                return
             message = self._codec.parse_outgoing(
                 stanza, route.binding_id, route.conversation_id
             )
+            if message.text and await self._messages.activate_button(
+                route.binding_id, route.conversation_id, message.text
+            ):
+                return
             await self._messages.send(message)
         except (InvalidCommand, InvalidXmppAddress):
             await self._send_error(stanza, XmppMessageError.BAD_REQUEST)

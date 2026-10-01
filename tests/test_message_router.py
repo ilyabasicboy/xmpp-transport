@@ -7,8 +7,8 @@ from xmpp_transport.application.message_router import MessageRouter
 from xmpp_transport.domain.errors import FeatureUnavailable
 from xmpp_transport.domain.events import EventEnvelope, MessageReceived
 from xmpp_transport.domain.identifiers import BackendId, BindingId, EventId, RemoteObjectId
-from xmpp_transport.domain.models import IncomingMessage, OutgoingMessage
-from xmpp_transport.ports.backend import MessageSender, SendResult
+from xmpp_transport.domain.models import IncomingMessage, MessageButton, OutgoingMessage
+from xmpp_transport.ports.backend import ButtonActions, MessageSender, SendResult
 
 
 FeatureT = TypeVar("FeatureT")
@@ -61,6 +61,16 @@ class FakeSender:
         self.calls += 1
         await asyncio.sleep(0)
         return SendResult(RemoteObjectId("remote-{}".format(message.client_message_id)))
+
+
+class FakeButtonActions:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def activate_button(
+        self, conversation_id, callback_id, payload, button_type  # type: ignore[no-untyped-def]
+    ) -> None:
+        self.calls.append((conversation_id, callback_id, payload, button_type))
 
 
 class FakeXmpp:
@@ -174,6 +184,31 @@ class MessageRouterTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ValueError):
             await self.router.receive(mismatched)
+
+    async def test_remembers_incoming_button_and_activates_callback(self) -> None:
+        actions = FakeButtonActions()
+        self.features.values[(self.binding_id, ButtonActions)] = actions
+        event = incoming_event(self.binding_id)
+        event = MessageReceived(
+            event.envelope,
+            IncomingMessage(
+                **{
+                    **event.message.__dict__,
+                    "buttons": ((MessageButton("OK", "confirm", "callback-1"),),),
+                }
+            ),
+        )
+
+        await self.router.receive(event)
+        activated = await self.router.activate_button(
+            self.binding_id, RemoteObjectId("conversation-1"), "/confirm"
+        )
+
+        self.assertTrue(activated)
+        self.assertEqual(
+            [(RemoteObjectId("conversation-1"), "callback-1", "confirm", "CALLBACK")],
+            actions.calls,
+        )
 
 
 if __name__ == "__main__":

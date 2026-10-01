@@ -8,12 +8,13 @@ and domain layers.
 from datetime import timezone
 from enum import Enum
 from html import escape
+import re
 from typing import TYPE_CHECKING, Optional
 from xml.etree import ElementTree as ET
 
 from xmpp_transport.domain.errors import InvalidCommand
 from xmpp_transport.domain.identifiers import BindingId, RemoteObjectId
-from xmpp_transport.domain.models import IncomingMessage, OutgoingMessage, ReplyReference
+from xmpp_transport.domain.models import IncomingMessage, MessageButton, OutgoingMessage, ReplyReference
 
 from .namespaces import (
     CLIENT_NS,
@@ -42,6 +43,7 @@ class XmppMessageError(str, Enum):
 class XmppMessageCodec:
     MAX_BODY_LENGTH = 65536
     MAX_ID_LENGTH = 512
+    BUTTON_COMMAND_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
 
     def parse_outgoing(
         self,
@@ -82,10 +84,11 @@ class XmppMessageCodec:
                 "id": message_id,
             },
         )
-        if message.text and len(message.text) > self.MAX_BODY_LENGTH:
+        body, button_range = self._body_with_buttons(message)
+        if body and len(body) > self.MAX_BODY_LENGTH:
             raise ValueError("incoming text message body is too large")
-        if message.text:
-            ET.SubElement(element, "body").text = message.text
+        if body:
+            ET.SubElement(element, "body").text = body
         ET.SubElement(element, _tag(SID_NS, "origin-id"), {"id": message_id})
         if message.reply_to is not None:
             ET.SubElement(
@@ -98,7 +101,84 @@ class XmppMessageCodec:
             occurred_at = occurred_at.replace(tzinfo=timezone.utc)
         stamp = occurred_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         ET.SubElement(element, _tag(DELAY_NS, "delay"), {"stamp": stamp})
+        if button_range is not None:
+            self._append_message_keyboard(element, message.buttons, button_range)
         return element
+
+    def _body_with_buttons(
+        self, message: IncomingMessage
+    ) -> tuple[str, Optional[tuple[int, int]]]:
+        body = message.text or ""
+        lines = []
+        for row_index, row in enumerate(message.buttons):
+            for button_index, button in enumerate(row):
+                command = self._message_button_command(button, row_index, button_index)
+                action = (
+                    "/{}".format(command)
+                    if self._message_button_type(button) == "callback"
+                    else button.payload.strip() or "/{}".format(command)
+                )
+                if button.text.strip() and action:
+                    lines.append("{} - {}".format(action, button.text.strip()))
+        if not lines:
+            return body, None
+        result = body.rstrip()
+        if result:
+            result += "\n\n"
+        begin = len(escape(result))
+        fallback = "Команды кнопок:\n" + "\n".join(lines)
+        return result + fallback, (begin, begin + len(escape(fallback)))
+
+    def _append_message_keyboard(
+        self,
+        element: ET.Element,
+        buttons,  # type: ignore[no-untyped-def]
+        body_range: tuple[int, int],
+    ) -> None:
+        reference = ET.SubElement(
+            element,
+            _tag(XABBER_REFERENCES_NS, "reference"),
+            {
+                "type": "mutable",
+                "begin": str(body_range[0]),
+                "end": str(body_range[1]),
+            },
+        )
+        keyboard = ET.SubElement(reference, _tag(BOT_UI_NS, "keyboard"), {"type": "inline"})
+        for row_index, row in enumerate(buttons):
+            row_element = ET.SubElement(keyboard, _tag(BOT_UI_NS, "row"))
+            for button_index, button in enumerate(row):
+                command = self._message_button_command(button, row_index, button_index)
+                ET.SubElement(
+                    row_element,
+                    _tag(BOT_UI_NS, "button"),
+                    {
+                        "id": command,
+                        "type": self._message_button_type(button),
+                        "label": button.text.strip(),
+                        "data": button.payload.strip() or "/{}".format(command),
+                    },
+                )
+
+    @classmethod
+    def _message_button_command(
+        cls, button: MessageButton, row_index: int, button_index: int
+    ) -> str:
+        payload = button.payload.strip()
+        if payload.startswith("/"):
+            payload = payload[1:].strip()
+        if cls.BUTTON_COMMAND_RE.fullmatch(payload):
+            return payload
+        return "button_{}_{}".format(row_index + 1, button_index + 1)
+
+    @staticmethod
+    def _message_button_type(button: MessageButton) -> str:
+        kind = button.kind.strip().lower()
+        if kind == "url":
+            return "url"
+        if kind in ("command", "webapp"):
+            return kind
+        return "callback" if kind or button.callback_id else "command"
 
     def serialize_group_message(
         self,

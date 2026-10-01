@@ -33,6 +33,17 @@ class ContactAdder(Protocol):
         ...
 
 
+class ButtonActions(Protocol):
+    async def activate_button(
+        self,
+        conversation_id: RemoteObjectId,
+        callback_id: str,
+        payload: str,
+        button_type: str,
+    ) -> None:
+        ...
+
+
 class ConversationSource(Protocol):
     async def conversations(self) -> Sequence[Conversation]:
         ...

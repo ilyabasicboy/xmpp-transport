@@ -28,11 +28,18 @@ from xmpp_transport.domain.models import (
     Conversation,
     ConversationKind,
     IncomingMessage,
+    MessageButton,
     OutgoingMessage,
     Participant,
     ReplyReference,
 )
-from xmpp_transport.ports.backend import ContactAdder, ContactSource, MessageSender, SendResult
+from xmpp_transport.ports.backend import (
+    ButtonActions,
+    ContactAdder,
+    ContactSource,
+    MessageSender,
+    SendResult,
+)
 from xmpp_transport.ports.events import BackendEventSink
 
 from .models import MaxAuthorizationError, MaxChat, MaxContact, MaxIncomingMessage
@@ -68,6 +75,16 @@ class MaxClient(Protocol):
         ...
 
     async def add_contact_by_phone(self, phone: str) -> MaxContact:
+        ...
+
+    async def send_button_callback(
+        self,
+        *,
+        chat_id: str,
+        callback_id: str,
+        payload: str,
+        button_type: str = "CALLBACK",
+    ) -> dict:
         ...
 
 
@@ -246,7 +263,12 @@ class MaxBackendSession:
         await self._publish_state(SessionState.STOPPED)
 
     def features(self) -> Mapping[type, object]:
-        return {MessageSender: self, ContactSource: self, ContactAdder: self}
+        return {
+            MessageSender: self,
+            ContactSource: self,
+            ContactAdder: self,
+            ButtonActions: self,
+        }
 
     async def contacts(self) -> Sequence[Contact]:
         contacts = await self._client.list_contacts()
@@ -256,6 +278,25 @@ class MaxBackendSession:
         if not self._started or self._closed:
             raise BackendUnavailable("MAX backend session is not active")
         return self._contact(await self._client.add_contact_by_phone(phone))
+
+    async def activate_button(
+        self,
+        conversation_id: RemoteObjectId,
+        callback_id: str,
+        payload: str,
+        button_type: str,
+    ) -> None:
+        if not self._started or self._closed:
+            raise BackendUnavailable("MAX backend session is not active")
+        try:
+            await self._client.send_button_callback(
+                chat_id=str(conversation_id),
+                callback_id=callback_id,
+                payload=payload,
+                button_type=button_type,
+            )
+        except Exception as exc:
+            raise BackendUnavailable("MAX button callback failed") from exc
 
     async def send_message(self, message: OutgoingMessage) -> SendResult:
         if not self._started or self._closed:
@@ -346,6 +387,18 @@ class MaxBackendSession:
                     occurred_at=datetime.now(timezone.utc),
                     text=message.text or None,
                     reply_to=reply,
+                    buttons=tuple(
+                        tuple(
+                            MessageButton(
+                                text=button.text,
+                                payload=button.payload,
+                                callback_id=button.callback_id,
+                                kind=button.kind,
+                            )
+                            for button in row
+                        )
+                        for row in message.buttons
+                    ),
                     attributes={
                         "is_group": "true" if message.is_group else "false",
                         "is_self": "true" if message.is_self else "false",

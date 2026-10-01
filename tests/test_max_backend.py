@@ -12,6 +12,7 @@ from xmpp_transport.adapters.backends.max.models import (
     MaxChat,
     MaxContact,
     MaxIncomingMessage,
+    MaxButton,
 )
 from xmpp_transport.domain.auth import AuthResponse, AuthResponseKind, AuthState
 from xmpp_transport.domain.events import (
@@ -23,7 +24,7 @@ from xmpp_transport.domain.events import (
 )
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
 from xmpp_transport.domain.models import OutgoingMessage
-from xmpp_transport.ports.backend import ContactAdder, ContactSource, MessageSender
+from xmpp_transport.ports.backend import ButtonActions, ContactAdder, ContactSource, MessageSender
 
 
 class EventSink:
@@ -42,6 +43,7 @@ class MaxClient:
         self.started = 0
         self.closed = 0
         self.sent = []
+        self.callbacks = []
 
     def set_message_handler(self, handler) -> None:  # type: ignore[no-untyped-def]
         self.message_handler = handler
@@ -67,6 +69,12 @@ class MaxClient:
 
     async def add_contact_by_phone(self, phone):  # type: ignore[no-untyped-def]
         return MaxContact("user-2", "Bob", "chat-2")
+
+    async def send_button_callback(
+        self, *, chat_id, callback_id, payload, button_type="CALLBACK"  # type: ignore[no-untyped-def]
+    ):
+        self.callbacks.append((chat_id, callback_id, payload, button_type))
+        return {}
 
 
 class LoginError(RuntimeError):
@@ -210,6 +218,31 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("incoming", messages[0].message.text)
         self.assertEqual(RemoteObjectId("chat-1"), messages[0].message.conversation_id)
         self.assertEqual("expired", lost[0].reason)
+
+    async def test_maps_buttons_and_sends_callback_through_feature(self) -> None:
+        await self.session.start()
+        await self.client.message_handler(  # type: ignore[misc]
+            MaxIncomingMessage(
+                sender_id="user-1",
+                text="Confirm?",
+                chat_id="chat-1",
+                message_id="message-1",
+                buttons=((MaxButton("OK", "confirm", "callback-1"),),),
+            )
+        )
+        message = next(
+            event.message for event in self.sink.events if isinstance(event, MessageReceived)
+        )
+        actions = self.session.features()[ButtonActions]
+        await actions.activate_button(  # type: ignore[attr-defined]
+            RemoteObjectId("chat-1"), "callback-1", "confirm", "CALLBACK"
+        )
+
+        self.assertEqual("confirm", message.buttons[0][0].payload)
+        self.assertEqual(
+            [("chat-1", "callback-1", "confirm", "CALLBACK")],
+            self.client.callbacks,
+        )
 
     async def test_ignores_self_messages_in_direct_chats(self) -> None:
         plugin = MaxBackendPlugin(

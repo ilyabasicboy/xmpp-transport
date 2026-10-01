@@ -69,12 +69,19 @@ class FakeMessageRouter:
     def __init__(self) -> None:
         self.outgoing = []
         self.failure: Optional[Exception] = None
+        self.button_actions = []
 
     async def send(self, message: OutgoingMessage) -> SendResult:
         if self.failure is not None:
             raise self.failure
         self.outgoing.append(message)
         return SendResult(RemoteObjectId("remote-result"))
+
+    async def activate_button(self, binding_id, conversation_id, value):  # type: ignore[no-untyped-def]
+        if value not in ("confirm", "/confirm"):
+            return False
+        self.button_actions.append((binding_id, conversation_id, value))
+        return True
 
 
 class FakeControl:
@@ -140,6 +147,23 @@ class XmppGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(BindingId("binding-1"), message.binding_id)
         self.assertEqual(RemoteObjectId("123"), message.conversation_id)
         self.assertEqual([], self.wire.sent)
+
+    async def test_routes_direct_bot_ui_callback_without_sending_text(self) -> None:
+        stanza = ET.fromstring(
+            """
+            <message from='user@example.com/device' to='chat-123@telegram.example.com'>
+              <callback xmlns='https://xabber.com/protocol/bot-ui' data='confirm'/>
+            </message>
+            """
+        )
+
+        await self.gateway.handle_stanza(stanza)
+
+        self.assertEqual(
+            [(BindingId("binding-1"), RemoteObjectId("123"), "confirm")],
+            self.router.button_actions,
+        )
+        self.assertEqual([], self.router.outgoing)
 
     async def test_ignores_transport_generated_fake_outgoing_stanza(self) -> None:
         stanza = ET.fromstring(
