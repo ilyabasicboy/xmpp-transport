@@ -12,7 +12,7 @@ from typing import Callable, Mapping, Optional, Protocol, Sequence, Tuple, Type
 from uuid import uuid4
 
 from xmpp_transport.domain.auth import AuthChallenge, AuthResponse, AuthState
-from xmpp_transport.domain.errors import BackendUnavailable, FeatureUnavailable, InvalidCommand
+from xmpp_transport.domain.errors import BackendUnavailable, InvalidCommand
 from xmpp_transport.domain.events import (
     AuthorizationLost,
     ContactChanged,
@@ -71,6 +71,7 @@ class MaxClient(Protocol):
         text: str,
         chat_id: Optional[str] = None,
         reply_to_message_id: Optional[str] = None,
+        media: tuple[object, ...] = (),
     ) -> dict:
         ...
 
@@ -306,8 +307,6 @@ class MaxBackendSession:
             raise BackendUnavailable("MAX backend session is not active")
         if message.binding_id != self._binding_id:
             raise InvalidCommand("message belongs to another binding")
-        if message.media:
-            raise FeatureUnavailable("MAX media sending is not connected yet")
         group_echo = None
         if message.attributes.get("is_group") == "true":
             group_echo = (str(message.conversation_id), message.text or "")
@@ -319,6 +318,7 @@ class MaxBackendSession:
                 reply_to_message_id=(
                     str(message.reply_to.message_id) if message.reply_to is not None else None
                 ),
+                media=tuple(message.media),
             )
         except Exception as exc:
             if group_echo is not None:

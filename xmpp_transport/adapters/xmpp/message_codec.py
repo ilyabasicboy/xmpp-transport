@@ -5,16 +5,26 @@ unwrapped only at the future component boundary, keeping them out of application
 and domain layers.
 """
 
+import hashlib
+import mimetypes
 import re
 from datetime import timezone
 from enum import Enum
 from html import escape
 from typing import TYPE_CHECKING, Optional
+from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree as ET
 
 from xmpp_transport.domain.errors import InvalidCommand
 from xmpp_transport.domain.identifiers import BindingId, RemoteObjectId
-from xmpp_transport.domain.models import IncomingMessage, MessageButton, OutgoingMessage, ReplyReference
+from xmpp_transport.domain.models import (
+    IncomingMessage,
+    Media,
+    MediaKind,
+    MessageButton,
+    OutgoingMessage,
+    ReplyReference,
+)
 
 from .namespaces import (
     CLIENT_NS,
@@ -61,12 +71,22 @@ class XmppMessageCodec:
 
         client_message_id = self._client_message_id(element)
         body = self._body(element)
+        media = self._outgoing_media(element, body)
+        for item in media:
+            if item.source_url:
+                body = "\n".join(
+                    line for line in body.splitlines() if line.strip() != item.source_url
+                )
+        body = body.strip()
+        if not body and not media:
+            raise InvalidCommand("message must contain text or media")
         reply = self._reply(element)
         return OutgoingMessage(
             client_message_id=client_message_id,
             binding_id=binding_id,
             conversation_id=conversation_id,
-            text=body,
+            text=body or None,
+            media=media,
             reply_to=reply,
         )
 
@@ -404,11 +424,96 @@ class XmppMessageCodec:
                 body_element = child
                 break
         body = "" if body_element is None else "".join(body_element.itertext())
-        if not body.strip():
-            raise InvalidCommand("text message body must not be empty")
         if len(body) > self.MAX_BODY_LENGTH:
             raise InvalidCommand("text message body is too large")
         return body
+
+    def _outgoing_media(self, element: ET.Element, body: str) -> tuple[Media, ...]:
+        result = []
+        seen = set()
+        for reference in element:
+            if reference.tag != _tag(XABBER_REFERENCES_NS, "reference"):
+                continue
+            voice = _child(reference, "voice-message", VOICE_MESSAGES_NS)
+            parent = voice if voice is not None else reference
+            sharing = _child(parent, "file-sharing", FILES_NS)
+            item = self._media_from_file_sharing(sharing, voice is not None)
+            if item is not None and item.source_url not in seen:
+                seen.add(item.source_url)
+                result.append(item)
+        for line in body.splitlines():
+            item = self._media_from_gallery_url(line.strip())
+            if item is not None and item.source_url not in seen:
+                seen.add(item.source_url)
+                result.append(item)
+        return tuple(result)
+
+    @staticmethod
+    def _media_from_file_sharing(
+        sharing: Optional[ET.Element], voice: bool
+    ) -> Optional[Media]:
+        if sharing is None:
+            return None
+        sources = _child(sharing, "sources")
+        url = ""
+        if sources is not None:
+            for child in sources:
+                candidate = (child.text or "").strip()
+                if _local_name(child.tag) == "uri" and candidate.startswith(
+                    ("http://", "https://")
+                ):
+                    url = candidate
+                    break
+        if not url:
+            return None
+        fields = {}
+        thumbnail_url = None
+        file_element = _child(sharing, "file")
+        if file_element is not None:
+            for child in file_element:
+                name = _local_name(child.tag)
+                if name == "thumbnail":
+                    thumbnail_url = (child.attrib.get("uri") or "").strip() or None
+                else:
+                    fields[name] = (child.text or "").strip()
+        content_type = (
+            fields.get("media-type")
+            or fields.get("mime-type")
+            or "application/octet-stream"
+        )
+        kind = _media_kind(content_type, voice)
+        return Media(
+            id=RemoteObjectId(hashlib.sha256(url.encode("utf-8")).hexdigest()),
+            kind=kind,
+            content_type=content_type,
+            file_name=fields.get("name") or None,
+            size=_positive_int(fields.get("size")),
+            source_url=url,
+            thumbnail_url=thumbnail_url,
+            width=_positive_int(fields.get("width")),
+            height=_positive_int(fields.get("height")),
+            duration=_positive_int(fields.get("duration")),
+            voice=voice,
+        )
+
+    @staticmethod
+    def _media_from_gallery_url(url: str) -> Optional[Media]:
+        if not url.startswith(("http://", "https://")):
+            return None
+        parsed = urlsplit(url)
+        if "/gallery/" not in parsed.path and "/upload/" not in parsed.path:
+            return None
+        name = unquote(parsed.path.rstrip("/").rsplit("/", 1)[-1])
+        if not name or "." not in name:
+            return None
+        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        return Media(
+            id=RemoteObjectId(hashlib.sha256(url.encode("utf-8")).hexdigest()),
+            kind=_media_kind(content_type, False),
+            content_type=content_type,
+            file_name=name,
+            source_url=url,
+        )
 
     def _reply(self, element: ET.Element) -> Optional[ReplyReference]:
         reply = element.find(_tag(REPLY_NS, "reply"))
@@ -427,6 +532,36 @@ def _tag(namespace: str, local_name: str) -> str:
 def _escaped_text_length(value: str) -> int:
     escaped = escape(value, quote=False)
     return len(escaped.encode("utf-16-le")) // 2
+
+
+def _child(
+    parent: ET.Element, local_name: str, namespace: Optional[str] = None
+) -> Optional[ET.Element]:
+    for child in parent:
+        if _local_name(child.tag) != local_name:
+            continue
+        if namespace is not None and _namespace(child.tag) != namespace:
+            continue
+        return child
+    return None
+
+
+def _positive_int(value: object) -> Optional[int]:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _media_kind(content_type: str, voice: bool) -> MediaKind:
+    if voice or content_type.startswith("audio/"):
+        return MediaKind.AUDIO
+    if content_type.startswith("image/"):
+        return MediaKind.IMAGE
+    if content_type.startswith("video/"):
+        return MediaKind.VIDEO
+    return MediaKind.FILE
 
 
 def _local_name(tag: str) -> str:

@@ -94,6 +94,49 @@ class ParseOutgoingTests(unittest.TestCase):
         with self.assertRaises(InvalidCommand):
             self.codec.parse_outgoing(stanza, self.binding_id, self.conversation_id)
 
+    def test_parses_xabber_file_sharing_and_strips_url_fallback(self) -> None:
+        stanza = ET.fromstring(
+            """
+            <message type='chat' id='media-1'>
+              <body>caption
+https://xabber.example/upload/photo.jpg</body>
+              <reference xmlns='https://xabber.com/protocol/references' type='mutable'>
+                <file-sharing xmlns='https://xabber.com/protocol/files'>
+                  <file><media-type>image/jpeg</media-type><name>photo.jpg</name>
+                    <size>123</size><width>640</width><height>480</height></file>
+                  <sources><uri>https://xabber.example/upload/photo.jpg</uri></sources>
+                </file-sharing>
+              </reference>
+            </message>
+            """
+        )
+        message = self.codec.parse_outgoing(stanza, self.binding_id, self.conversation_id)
+        self.assertEqual("caption", message.text)
+        self.assertEqual("https://xabber.example/upload/photo.jpg", message.media[0].source_url)
+        self.assertEqual("photo.jpg", message.media[0].file_name)
+        self.assertEqual((640, 480), (message.media[0].width, message.media[0].height))
+
+    def test_parses_media_only_voice_message(self) -> None:
+        stanza = ET.fromstring(
+            """
+            <message type='chat' id='voice-1'>
+              <reference xmlns='https://xabber.com/protocol/references' type='mutable'>
+                <voice-message xmlns='https://xabber.com/protocol/voice-messages'>
+                  <file-sharing xmlns='https://xabber.com/protocol/files'>
+                    <file><media-type>audio/ogg; codecs=opus</media-type>
+                      <name>voice.ogg</name><duration>3</duration></file>
+                    <sources><uri>https://xabber.example/upload/voice.ogg</uri></sources>
+                  </file-sharing>
+                </voice-message>
+              </reference>
+            </message>
+            """
+        )
+        message = self.codec.parse_outgoing(stanza, self.binding_id, self.conversation_id)
+        self.assertIsNone(message.text)
+        self.assertTrue(message.media[0].voice)
+        self.assertEqual(3, message.media[0].duration)
+
     def test_rejects_empty_body(self) -> None:
         stanza = ET.fromstring("<message type='chat' id='1'><body> </body></message>")
         with self.assertRaises(InvalidCommand):

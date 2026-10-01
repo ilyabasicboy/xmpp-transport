@@ -400,11 +400,19 @@ class PersonalMaxBackend:
         return attaches
 
     async def _download_outgoing_media(self, media: object) -> Optional[OutgoingMediaUpload]:
-        url = str(getattr(media, "url", "") or "").strip()
+        url = str(
+            getattr(media, "source_url", None) or getattr(media, "url", "") or ""
+        ).strip()
         if not url:
             return None
-        mime_type = str(getattr(media, "mime_type", "") or "application/octet-stream").strip().lower()
-        name = str(getattr(media, "name", "") or "").strip() or self._outgoing_media_name(url, mime_type)
+        mime_type = str(
+            getattr(media, "content_type", None)
+            or getattr(media, "mime_type", "")
+            or "application/octet-stream"
+        ).strip().lower()
+        name = str(
+            getattr(media, "file_name", None) or getattr(media, "name", "") or ""
+        ).strip() or self._outgoing_media_name(url, mime_type)
         if self.session is None:
             raise RuntimeError("MAX personal HTTP session is not started")
         timeout = ClientTimeout(total=60)

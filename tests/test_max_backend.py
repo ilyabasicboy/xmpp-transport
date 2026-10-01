@@ -24,7 +24,7 @@ from xmpp_transport.domain.events import (
     SessionStateChanged,
 )
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
-from xmpp_transport.domain.models import OutgoingMessage
+from xmpp_transport.domain.models import Media, MediaKind, OutgoingMessage
 from xmpp_transport.ports.backend import ButtonActions, ContactAdder, ContactSource, MessageSender
 
 
@@ -61,8 +61,10 @@ class MaxClient:
     async def close(self) -> None:
         self.closed += 1
 
-    async def send_message(self, text, chat_id=None, reply_to_message_id=None):  # type: ignore[no-untyped-def]
-        self.sent.append((text, chat_id, reply_to_message_id))
+    async def send_message(  # type: ignore[no-untyped-def]
+        self, text, chat_id=None, reply_to_message_id=None, media=()
+    ):
+        self.sent.append((text, chat_id, reply_to_message_id, media))
         return {"message": {"id": "sent-1"}}
 
     async def list_contacts(self):  # type: ignore[no-untyped-def]
@@ -168,10 +170,30 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         await self.session.close()
 
         self.assertEqual(RemoteObjectId("sent-1"), result.remote_message_id)
-        self.assertEqual([("hello", "chat-1", None)], self.client.sent)
+        self.assertEqual([("hello", "chat-1", None, ())], self.client.sent)
         self.assertEqual((1, 1), (self.client.started, self.client.closed))
         states = [event.state.value for event in self.sink.events if isinstance(event, SessionStateChanged)]
         self.assertEqual(["starting", "connected", "stopped"], states)
+
+    async def test_sends_media_through_max_client(self) -> None:
+        await self.session.start()
+        media = Media(
+            id=RemoteObjectId("media-1"),
+            kind=MediaKind.IMAGE,
+            content_type="image/jpeg",
+            file_name="photo.jpg",
+            source_url="https://xabber.example/upload/photo.jpg",
+        )
+        await self.session.send_message(
+            OutgoingMessage(
+                client_message_id="client-media-1",
+                binding_id=BindingId("binding-1"),
+                conversation_id=RemoteObjectId("chat-1"),
+                media=(media,),
+            )
+        )
+        self.assertEqual("", self.client.sent[0][0])
+        self.assertEqual((media,), self.client.sent[0][3])
 
     async def test_suppresses_MAX_echo_after_xabber_group_send(self) -> None:
         await self.session.start()
