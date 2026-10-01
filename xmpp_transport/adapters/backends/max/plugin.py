@@ -4,6 +4,7 @@ The network client is intentionally introduced behind this boundary so MAX
 wire details do not leak into the application and domain packages.
 """
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,6 +30,8 @@ from xmpp_transport.domain.models import (
     ConversationKind,
     IncomingMessage,
     MessageButton,
+    Media,
+    MediaKind,
     OutgoingMessage,
     Participant,
     ReplyReference,
@@ -42,7 +45,7 @@ from xmpp_transport.ports.backend import (
 )
 from xmpp_transport.ports.events import BackendEventSink
 
-from .models import MaxAuthorizationError, MaxChat, MaxContact, MaxIncomingMessage
+from .models import MaxAuthorizationError, MaxChat, MaxContact, MaxIncomingMessage, MaxMedia
 
 
 class MaxClient(Protocol):
@@ -399,6 +402,7 @@ class MaxBackendSession:
                         )
                         for row in message.buttons
                     ),
+                    media=tuple(self._media(item) for item in message.media),
                     attributes={
                         "is_group": "true" if message.is_group else "false",
                         "is_self": "true" if message.is_self else "false",
@@ -486,6 +490,31 @@ class MaxBackendSession:
                 if contact.avatar is not None
                 else None
             ),
+        )
+
+    @staticmethod
+    def _media(media: MaxMedia) -> Media:
+        content_type = media.mime_type or "application/octet-stream"
+        if media.voice or content_type.startswith("audio/"):
+            kind = MediaKind.AUDIO
+        elif content_type.startswith("image/"):
+            kind = MediaKind.IMAGE
+        elif content_type.startswith("video/"):
+            kind = MediaKind.VIDEO
+        else:
+            kind = MediaKind.FILE
+        return Media(
+            id=RemoteObjectId(hashlib.sha256(media.url.encode("utf-8")).hexdigest()),
+            kind=kind,
+            content_type=content_type,
+            file_name=media.name or None,
+            size=media.size or None,
+            source_url=media.url,
+            thumbnail_url=media.thumbnail_url,
+            width=media.width,
+            height=media.height,
+            duration=media.duration,
+            voice=media.voice,
         )
 
     def _member_direct_chat_id(self, member_user_id: str) -> Optional[str]:

@@ -13,6 +13,7 @@ from xmpp_transport.adapters.backends.max.models import (
     MaxContact,
     MaxIncomingMessage,
     MaxButton,
+    MaxMedia,
 )
 from xmpp_transport.domain.auth import AuthResponse, AuthResponseKind, AuthState
 from xmpp_transport.domain.events import (
@@ -243,6 +244,36 @@ class MaxBackendSessionTests(unittest.IsolatedAsyncioTestCase):
             [("chat-1", "callback-1", "confirm", "CALLBACK")],
             self.client.callbacks,
         )
+
+    async def test_maps_incoming_max_media_to_provider_neutral_metadata(self) -> None:
+        await self.session.start()
+        await self.client.message_handler(  # type: ignore[misc]
+            MaxIncomingMessage(
+                sender_id="user-1",
+                text="photo",
+                chat_id="chat-1",
+                message_id="message-1",
+                media=(
+                    MaxMedia(
+                        url="https://cdn.example/photo.jpg",
+                        name="photo.jpg",
+                        mime_type="image/jpeg",
+                        size=123,
+                        thumbnail_url="https://cdn.example/thumb.jpg",
+                        width=640,
+                        height=480,
+                    ),
+                ),
+            )
+        )
+
+        message = next(
+            event.message for event in self.sink.events if isinstance(event, MessageReceived)
+        )
+        media = message.media[0]
+        self.assertEqual("image", media.kind.value)
+        self.assertEqual("https://cdn.example/photo.jpg", media.source_url)
+        self.assertEqual((640, 480), (media.width, media.height))
 
     async def test_ignores_self_messages_in_direct_chats(self) -> None:
         plugin = MaxBackendPlugin(

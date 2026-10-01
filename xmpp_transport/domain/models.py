@@ -67,6 +67,12 @@ class Media:
     content_type: Optional[str] = None
     file_name: Optional[str] = None
     size: Optional[int] = None
+    source_url: Optional[str] = field(default=None, repr=False)
+    thumbnail_url: Optional[str] = field(default=None, repr=False)
+    width: Optional[int] = None
+    height: Optional[int] = None
+    duration: Optional[int] = None
+    voice: bool = False
 
 
 @dataclass(frozen=True)

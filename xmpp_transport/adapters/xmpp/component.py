@@ -85,6 +85,29 @@ class SlixmppComponentWire:
         ready = self._ready
         if client is None or ready is None or not ready.is_set():
             raise ConnectionError("XMPP component is not connected")
+        if element.tag.rsplit("}", 1)[-1] == "message":
+            body = next(
+                (
+                    child
+                    for child in element
+                    if child.tag.rsplit("}", 1)[-1] == "body"
+                ),
+                None,
+            )
+            message = client.make_message(
+                mfrom=element.attrib.get("from"),
+                mto=element.attrib.get("to"),
+                mtype=element.attrib.get("type"),
+                mbody=body.text if body is not None else None,
+            )
+            for name, value in element.attrib.items():
+                if name not in {"from", "to", "type"}:
+                    message.xml.set(name, value)
+            for child in element:
+                if child is not body:
+                    message.xml.append(child)
+            message.send()
+            return
         client.send_raw(ET.tostring(element, encoding="unicode"))
 
     async def request(self, element: ET.Element, timeout: float = 10.0) -> ET.Element:

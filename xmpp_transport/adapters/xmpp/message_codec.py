@@ -5,10 +5,10 @@ unwrapped only at the future component boundary, keeping them out of application
 and domain layers.
 """
 
+import re
 from datetime import timezone
 from enum import Enum
 from html import escape
-import re
 from typing import TYPE_CHECKING, Optional
 from xml.etree import ElementTree as ET
 
@@ -27,6 +27,8 @@ from .namespaces import (
     REPLY_NS,
     SID_NS,
     STANZAS_NS,
+    THUMBS_NS,
+    VOICE_MESSAGES_NS,
     XABBER_REFERENCES_NS,
 )
 
@@ -84,7 +86,8 @@ class XmppMessageCodec:
                 "id": message_id,
             },
         )
-        body, button_range = self._body_with_buttons(message)
+        body, media_ranges = self._body_with_media(message.text or "", message.media)
+        body, button_range = self._body_with_buttons(body, message.buttons)
         if body and len(body) > self.MAX_BODY_LENGTH:
             raise ValueError("incoming text message body is too large")
         if body:
@@ -101,16 +104,17 @@ class XmppMessageCodec:
             occurred_at = occurred_at.replace(tzinfo=timezone.utc)
         stamp = occurred_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         ET.SubElement(element, _tag(DELAY_NS, "delay"), {"stamp": stamp})
+        for media, begin, end in media_ranges:
+            self._append_media_reference(element, media, begin, end)
         if button_range is not None:
             self._append_message_keyboard(element, message.buttons, button_range)
         return element
 
     def _body_with_buttons(
-        self, message: IncomingMessage
+        self, body: str, buttons  # type: ignore[no-untyped-def]
     ) -> tuple[str, Optional[tuple[int, int]]]:
-        body = message.text or ""
         lines = []
-        for row_index, row in enumerate(message.buttons):
+        for row_index, row in enumerate(buttons):
             for button_index, button in enumerate(row):
                 command = self._message_button_command(button, row_index, button_index)
                 action = (
@@ -125,9 +129,64 @@ class XmppMessageCodec:
         result = body.rstrip()
         if result:
             result += "\n\n"
-        begin = len(escape(result))
+        begin = _escaped_text_length(result)
         fallback = "Команды кнопок:\n" + "\n".join(lines)
-        return result + fallback, (begin, begin + len(escape(fallback)))
+        return result + fallback, (begin, begin + _escaped_text_length(fallback))
+
+    @staticmethod
+    def _body_with_media(body, media):  # type: ignore[no-untyped-def]
+        ranges = []
+        items = tuple(item for item in media if item.source_url)
+        result = body
+        if items and result and not result.endswith("\n"):
+            result += "\n"
+        for index, item in enumerate(items):
+            begin = _escaped_text_length(result)
+            fallback = (
+                item.file_name or "attachment"
+                if item.source_url.startswith("data:")
+                else item.source_url
+            )
+            result += fallback
+            end = _escaped_text_length(result)
+            ranges.append((item, begin, end))
+            if index != len(items) - 1:
+                result += "\n"
+        return result, ranges
+
+    @staticmethod
+    def _append_media_reference(element, media, begin, end):  # type: ignore[no-untyped-def]
+        reference = ET.SubElement(
+            element,
+            _tag(XABBER_REFERENCES_NS, "reference"),
+            {"type": "mutable", "begin": str(begin), "end": str(end)},
+        )
+        parent = reference
+        if media.voice:
+            parent = ET.SubElement(reference, _tag(VOICE_MESSAGES_NS, "voice-message"))
+        sharing = ET.SubElement(parent, _tag(FILES_NS, "file-sharing"))
+        file_element = ET.SubElement(sharing, "file")
+        fields = (
+            ("media-type", media.content_type),
+            ("name", media.file_name),
+            ("size", media.size),
+            ("height", media.height),
+            ("width", media.width),
+            ("duration", media.duration),
+        )
+        for name, value in fields:
+            if value is not None and value != "" and not (
+                isinstance(value, int) and value <= 0
+            ):
+                ET.SubElement(file_element, name).text = str(value)
+        if media.thumbnail_url:
+            ET.SubElement(
+                file_element,
+                _tag(THUMBS_NS, "thumbnail"),
+                {"uri": media.thumbnail_url},
+            )
+        sources = ET.SubElement(sharing, "sources")
+        ET.SubElement(sources, "uri").text = media.source_url
 
     def _append_message_keyboard(
         self,
@@ -363,6 +422,11 @@ class XmppMessageCodec:
 
 def _tag(namespace: str, local_name: str) -> str:
     return "{{{}}}{}".format(namespace, local_name)
+
+
+def _escaped_text_length(value: str) -> int:
+    escaped = escape(value, quote=False)
+    return len(escaped.encode("utf-16-le")) // 2
 
 
 def _local_name(tag: str) -> str:

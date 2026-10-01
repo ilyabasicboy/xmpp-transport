@@ -7,9 +7,12 @@ from xmpp_transport.adapters.xmpp.namespaces import (
     BOT_UI_NS,
     DATA_FORMS_NS,
     DELAY_NS,
+    FILES_NS,
     REPLY_NS,
     SID_NS,
     STANZAS_NS,
+    THUMBS_NS,
+    VOICE_MESSAGES_NS,
 )
 from xmpp_transport.adapters.xmpp.auth_commands import (
     ControlButton,
@@ -19,7 +22,13 @@ from xmpp_transport.adapters.xmpp.auth_commands import (
 )
 from xmpp_transport.domain.errors import InvalidCommand
 from xmpp_transport.domain.identifiers import BindingId, RemoteObjectId
-from xmpp_transport.domain.models import IncomingMessage, MessageButton, ReplyReference
+from xmpp_transport.domain.models import (
+    IncomingMessage,
+    Media,
+    MediaKind,
+    MessageButton,
+    ReplyReference,
+)
 
 
 def tag(namespace: str, name: str) -> str:
@@ -166,6 +175,78 @@ class SerializeIncomingTests(unittest.TestCase):
             {"id": "confirm", "type": "callback", "label": "OK", "data": "confirm"},
             button.attrib,
         )
+
+    def test_serializes_incoming_image_as_xabber_file_sharing(self) -> None:
+        message = IncomingMessage(
+            id=RemoteObjectId("remote-message-1"),
+            binding_id=BindingId("binding-1"),
+            conversation_id=RemoteObjectId("conversation-1"),
+            sender_id=RemoteObjectId("sender-1"),
+            occurred_at=datetime.now(timezone.utc),
+            text="Hi 😀 & <tag>",
+            media=(
+                Media(
+                    id=RemoteObjectId("media-1"),
+                    kind=MediaKind.IMAGE,
+                    content_type="image/jpeg",
+                    file_name="photo.jpg",
+                    size=211834,
+                    source_url="https://i.oneme.ru/i?r=a&x=😀",
+                    thumbnail_url="https://i.oneme.ru/thumb?r=a&x=😀",
+                    width=1280,
+                    height=960,
+                ),
+            ),
+        )
+
+        stanza = self.codec.serialize_incoming(
+            message, "chat-1@max.example.com", "user@example.com"
+        )
+
+        self.assertEqual(
+            "Hi 😀 & <tag>\nhttps://i.oneme.ru/i?r=a&x=😀",
+            stanza.findtext("body"),
+        )
+        reference = stanza.find("{https://xabber.com/protocol/references}reference")
+        self.assertEqual(("24", "57"), (reference.attrib["begin"], reference.attrib["end"]))
+        sharing = reference.find("{{{}}}file-sharing".format(FILES_NS))
+        self.assertEqual("photo.jpg", sharing.findtext("file/name"))
+        self.assertEqual("1280", sharing.findtext("file/width"))
+        thumbnail = sharing.find("file/{{{}}}thumbnail".format(THUMBS_NS))
+        self.assertEqual("https://i.oneme.ru/thumb?r=a&x=😀", thumbnail.attrib["uri"])
+        self.assertEqual(
+            "https://i.oneme.ru/i?r=a&x=😀", sharing.findtext("sources/uri")
+        )
+
+    def test_wraps_voice_media_in_voice_message(self) -> None:
+        message = IncomingMessage(
+            id=RemoteObjectId("remote-message-1"),
+            binding_id=BindingId("binding-1"),
+            conversation_id=RemoteObjectId("conversation-1"),
+            sender_id=RemoteObjectId("sender-1"),
+            occurred_at=datetime.now(timezone.utc),
+            media=(
+                Media(
+                    id=RemoteObjectId("voice-1"),
+                    kind=MediaKind.AUDIO,
+                    content_type="audio/ogg; codecs=opus",
+                    file_name="voice.ogg",
+                    source_url="https://cdn.example/voice.ogg",
+                    duration=4,
+                    voice=True,
+                ),
+            ),
+        )
+
+        stanza = self.codec.serialize_incoming(
+            message, "chat-1@max.example.com", "user@example.com"
+        )
+
+        voice = stanza.find(
+            ".//{{{}}}voice-message".format(VOICE_MESSAGES_NS)
+        )
+        self.assertIsNotNone(voice)
+        self.assertIsNotNone(voice.find("{{{}}}file-sharing".format(FILES_NS)))
 
     def test_builds_client_safe_error_without_reflecting_body(self) -> None:
         request = ET.fromstring(
