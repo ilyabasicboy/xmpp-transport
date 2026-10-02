@@ -29,8 +29,8 @@ class AuthChallenge:
     message: Optional[str] = None
 
     def __post_init__(self) -> None:
-        if self.public_url is not None and not self.public_url.startswith("https://"):
-            raise ValueError("authentication public_url must use HTTPS")
+        if self.public_url is not None and not self.public_url.startswith(("https://", "tg://")):
+            raise ValueError("authentication public_url must use HTTPS or Telegram login scheme")
 
 
 @dataclass(frozen=True)

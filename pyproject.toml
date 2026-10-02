@@ -13,6 +13,7 @@ dependencies = [
   "cryptography>=41,<47",
   "qrcode>=7.4,<9",
   "slixmpp>=1.8,<1.11",
+  "telethon>=1.36,<2",
 ]
 
 [project.optional-dependencies]

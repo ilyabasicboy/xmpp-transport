@@ -204,6 +204,7 @@ class SingleBackendRuntime:
             bindings,
             self._wire,
             codec,
+            self._backend.name.upper(),
         )
         authentication = AuthenticationCoordinator(
             registry,
@@ -224,6 +225,7 @@ class SingleBackendRuntime:
                 self._backend.options.get("contacts_page_size", "20"),
                 "contacts_page_size",
             ),
+            provider_name=self._backend.name.upper(),
         )
         gateway = XmppDirectMessageGateway(
             self._wire,

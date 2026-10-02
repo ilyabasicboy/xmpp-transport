@@ -68,8 +68,11 @@ class XmppAuthenticationCommands:
         sessions: Optional[BackendFeatureProvider] = None,
         roster: Optional[XmppRoster] = None,
         contacts_page_size: int = 20,
+        provider_name: Optional[str] = None,
     ) -> None:
         self._backend_id = backend_id
+        self._provider_name = provider_name or str(backend_id).upper()
+
         localpart = control_localpart.strip().lower()
         if not localpart or "@" in localpart or "/" in localpart:
             raise ValueError("control localpart is invalid")
@@ -107,6 +110,8 @@ class XmppAuthenticationCommands:
             return self._response(await self._logout(owner))
         if command_name == "/contacts":
             return await self._contacts(owner, argument)
+        if command_name == "/sync-contacts":
+            return self._response(await self._sync_contacts(owner))
         if command_name == "/add":
             return self._response(await self._add(owner, argument))
         if command_name not in ("/login", "/password"):
@@ -146,8 +151,10 @@ class XmppAuthenticationCommands:
             if not challenge.public_url:
                 return self._response("MAX не вернул данные для QR-кода.")
             return ControlResponse(
-                "Отсканируйте QR-код приложением MAX.\n"
-                "После подтверждения transport сообщит о результате здесь.",
+                self._provider_text(
+                    "Отсканируйте QR-код приложением MAX.\n"
+                    "После подтверждения transport сообщит о результате здесь."
+                ),
                 (_qr_svg(challenge.public_url),),
                 buttons=self._main_menu_buttons(),
             )
@@ -212,7 +219,7 @@ class XmppAuthenticationCommands:
             for index, contact in enumerate(shown, start=1)
         )
         rows.extend(self._main_menu_buttons())
-        return ControlResponse("\n".join(lines), buttons=tuple(rows))
+        return ControlResponse(self._provider_text("\n".join(lines)), buttons=tuple(rows))
 
     async def _add(self, owner: str, argument: str) -> str:
         binding, source = await self._active(owner)
@@ -238,6 +245,19 @@ class XmppAuthenticationCommands:
         await self._roster.add_contact(binding.binding_id, contact)
         return "Контакт добавлен в Xabber: {}".format(contact.display_name)
 
+    async def _sync_contacts(self, owner: str) -> str:
+        binding, source = await self._active(owner)
+        if binding is None or source is None or self._roster is None:
+            return "{} не подключен. Отправьте /login для авторизации.".format(
+                self._provider_name
+            )
+        contacts = tuple(await source.contacts())
+        for contact in contacts:
+            await self._roster.add_contact(binding.binding_id, contact)
+        return "Синхронизировано контактов {}: {}.".format(
+            self._provider_name, len(contacts)
+        )
+
     async def _logout(self, owner: str) -> str:
         binding = await self._bindings.binding_for_authentication(owner, self._backend_id)
         if binding is None:
@@ -256,42 +276,58 @@ class XmppAuthenticationCommands:
             "/password <пароль> - продолжить login при включенной 2FA\n"
             "/status - проверить состояние подключения\n"
             "/contacts [страница] - показать контакты MAX\n"
+            "/sync-contacts - повторно синхронизировать контакты\n"
             "/add <номер> - добавить выбранный контакт в Xabber\n"
             "/add phone +79990000000 - добавить контакт MAX по телефону\n"
             "/logout - отключить MAX и удалить сохраненную сессию\n"
             "/help - показать команды"
         )
 
-    @classmethod
-    def _response(cls, body: str) -> ControlResponse:
-        return ControlResponse(body, buttons=cls._main_menu_buttons())
-
-    @staticmethod
-    def _main_menu_buttons():  # type: ignore[no-untyped-def]
-        return (
-            (ControlButton("Подключить MAX", "/login"), ControlButton("Статус", "/status")),
-            (ControlButton("Контакты", "/contacts"), ControlButton("Отключить", "/logout")),
-            (ControlButton("Пароль 2FA", "/password"), ControlButton("Помощь", "/help")),
+    def _response(self, body: str) -> ControlResponse:
+        return ControlResponse(
+            self._provider_text(body), buttons=self._main_menu_buttons()
         )
 
-    @classmethod
-    def _password_form(cls) -> ControlResponse:
+    def _provider_text(self, value: str) -> str:
+        return value.replace("MAX", self._provider_name)
+
+    def _main_menu_buttons(self):  # type: ignore[no-untyped-def]
+        return (
+            (
+                ControlButton("Подключить {}".format(self._provider_name), "/login"),
+                ControlButton("Статус", "/status"),
+            ),
+            (
+                ControlButton("Контакты", "/contacts"),
+                ControlButton("Отключить", "/logout"),
+            ),
+            (ControlButton("Синхронизировать", "/sync-contacts"),),
+            (
+                ControlButton("Пароль 2FA", "/password"),
+                ControlButton("Помощь", "/help"),
+            ),
+        )
+
+    def _password_form(self) -> ControlResponse:
         return ControlResponse(
-            "MAX запросил пароль двухфакторной авторизации.\n"
-            "Введите пароль в форме. Transport передаст его MAX однократно и не сохранит.",
-            buttons=cls._main_menu_buttons(),
+            self._provider_text(
+                "MAX запросил пароль двухфакторной авторизации.\n"
+                "Введите пароль в форме. Transport передаст его MAX однократно и не сохранит."
+            ),
+            buttons=self._main_menu_buttons(),
             forms=(
                 ControlForm(
-                    "Пароль MAX 2FA",
-                    "Введите пароль MAX для продолжения авторизации.",
+                    self._provider_text("Пароль MAX 2FA"),
+                    self._provider_text("Введите пароль MAX для продолжения авторизации."),
                     (
                         ControlFormField("command", type="hidden", value="password"),
-                        ControlFormField("password", label="Пароль", type="text-private", required=True),
+                        ControlFormField(
+                            "password", label="Пароль", type="text-private", required=True
+                        ),
                     ),
                 ),
             ),
         )
-
 
 class XmppAuthenticationNotices:
     def __init__(
@@ -300,12 +336,13 @@ class XmppAuthenticationNotices:
         bindings: BindingRepository,
         wire,  # type: ignore[no-untyped-def]
         codec,  # type: ignore[no-untyped-def]
+        provider_name: str = "MAX",
     ) -> None:
         self._control_jid = control_jid
         self._bindings = bindings
         self._wire = wire
         self._codec = codec
-
+        self._provider_name = provider_name
     async def deliver(self, binding_id: BindingId, challenge: AuthChallenge) -> None:
         owner_jid = await self._bindings.xmpp_account_for_authentication(binding_id)
         if owner_jid is None:
@@ -318,7 +355,7 @@ class XmppAuthenticationNotices:
             body = challenge.message or "Авторизация MAX завершилась с ошибкой."
         await self._wire.send(
             self._codec.control_notice(
-                self._control_jid, owner_jid, ControlResponse(body)
+                self._control_jid, owner_jid, ControlResponse(body.replace("MAX", self._provider_name))
             )
         )
 
