@@ -4,7 +4,7 @@ from xml.etree import ElementTree as ET
 from xmpp_transport.adapters.xmpp.addressing import ContactAddressCodec
 from xmpp_transport.adapters.xmpp.roster import XmppServerRoster
 from xmpp_transport.domain.identifiers import BindingId, RemoteObjectId
-from xmpp_transport.domain.models import Contact
+from xmpp_transport.domain.models import Avatar, Contact
 
 
 NAMESPACE = "urn:xabber:transport:max:1"
@@ -13,13 +13,17 @@ NAMESPACE = "urn:xabber:transport:max:1"
 class Wire:
     def __init__(self) -> None:
         self.requests = []
+        self.sent = []
 
     async def request(self, element: ET.Element, timeout: float = 10.0) -> ET.Element:
         self.requests.append(element)
         response = ET.Element("iq", {"type": "result"})
-        ET.SubElement(response, "{{{}}}query".format(NAMESPACE), {"status": "ok"})
+        ET.SubElement(response, "{{{}}}query".format(NAMESPACE), {"status": "updated"})
         return response
 
+
+    async def send(self, element: ET.Element) -> None:
+        self.sent.append(element)
 
 class Bindings:
     async def xmpp_account_for_binding(self, binding_id):  # type: ignore[no-untyped-def]
@@ -69,6 +73,39 @@ class XmppServerRosterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("remove-roster-contact", query.attrib["op"])
         self.assertIsNone(query.find("group"))
 
+
+    async def test_add_contact_publishes_external_avatar_metadata(self) -> None:
+        contact = Contact(
+            RemoteObjectId("42"),
+            "Alice",
+            avatar=Avatar(
+                "https://max.example/avatar.jpg",
+                "avatar-id",
+                "image/jpeg",
+                12345,
+            ),
+        )
+
+        await self.roster.add_contact(BindingId("binding-1"), contact)
+
+        message = self.wire.sent[0]
+        self.assertEqual("chat-42@max.example.com", message.attrib["from"])
+        self.assertEqual("user@example.com", message.attrib["to"])
+        self.assertEqual("headline", message.attrib["type"])
+        metadata = message.find(".//{urn:xmpp:avatar:metadata}metadata")
+        assert metadata is not None
+        info = metadata.find("info")
+        self.assertIsNotNone(info)
+        assert info is not None
+        self.assertEqual(
+            {
+                "bytes": "12345",
+                "id": "avatar-id",
+                "type": "image/jpeg",
+                "url": "https://max.example/avatar.jpg",
+            },
+            info.attrib,
+        )
 
 if __name__ == "__main__":
     unittest.main()

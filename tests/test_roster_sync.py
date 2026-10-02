@@ -110,11 +110,12 @@ class RosterSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(RosterSyncResult.RENAMED, result)
         self.assertEqual("rename", self.xmpp.operations[-1][0])
 
-    async def test_avatar_change_does_not_rewrite_roster_item(self) -> None:
+    async def test_avatar_change_resynchronizes_roster_item(self) -> None:
         await self.sync.handle(contact_event(self.contact))
         changed = Contact(self.contact.id, "Alice", avatar=Avatar("avatar-2"))
         result = await self.sync.handle(contact_event(changed))
-        self.assertEqual(RosterSyncResult.UNCHANGED, result)
+        self.assertEqual(RosterSyncResult.RENAMED, result)
+        self.assertEqual("rename", self.xmpp.operations[-1][0])
 
     async def test_removed_contact_deletes_item_and_signature(self) -> None:
         await self.sync.handle(contact_event(self.contact))

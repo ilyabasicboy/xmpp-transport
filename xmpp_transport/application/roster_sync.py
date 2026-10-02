@@ -21,6 +21,16 @@ def contact_signature(contact: Contact) -> str:
     """Hash only fields that affect the roster item managed by this service."""
     canonical = json.dumps(
         {
+            "avatar": (
+                {
+                    "content_type": contact.avatar.content_type,
+                    "reference": contact.avatar.reference,
+                    "size": contact.avatar.size,
+                    "version": contact.avatar.version,
+                }
+                if contact.avatar is not None
+                else None
+            ),
             "display_name": contact.display_name,
             "remote_id": str(contact.id),
         },

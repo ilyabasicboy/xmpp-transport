@@ -5,14 +5,17 @@ explicit guarantee while allowing unrelated bindings to make progress in
 parallel. The public port remains independent of ``asyncio.Queue`` so a durable
 broker can replace this adapter later.
 """
-
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from xmpp_transport.domain.events import BackendEvent
 from xmpp_transport.domain.identifiers import BindingId, EventId
 from xmpp_transport.ports.events import BackendEventHandler
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,14 @@ class InMemoryEventBus:
                     await self._handler.handle(event)
                 except Exception as exc:  # A failed event must not kill its binding worker.
                     envelope = event.envelope
+                    log.error(
+                        "Backend event dispatch failed event_id=%s event_type=%s "
+                        "binding_id=%s exception_type=%s",
+                        envelope.event_id,
+                        envelope.event_type,
+                        envelope.binding_id,
+                        type(exc).__name__,
+                    )
                     self._failures.append(
                         EventFailure(
                             event_id=envelope.event_id,

@@ -8,12 +8,16 @@ from xmpp_transport.domain.models import Contact
 from xmpp_transport.ports.repositories import BindingRepository
 
 from .addressing import ContactAddressCodec
+from .namespaces import PUBSUB_AVATAR_METADATA_NS, PUBSUB_EVENT_NS
 
 
 class IqWire(Protocol):
     async def request(self, element: ET.Element, timeout: float = 10.0) -> ET.Element:
         ...
 
+
+    async def send(self, element: ET.Element) -> None:
+        ...
 
 class XmppServerRoster:
     def __init__(
@@ -73,5 +77,46 @@ class XmppServerRoster:
                 ET.SubElement(query, "group").text = group_name
         response = await self._wire.request(iq)
         result = response.find("{{{}}}query".format(self._namespace))
-        if result is not None and result.attrib.get("status", "ok") != "ok":
+        if result is not None and result.attrib.get("status", "ok") not in {
+            "ok", "updated", "unchanged", "removed"
+        }:
             raise ConnectionError("XMPP roster helper did not complete operation")
+        if operation != "remove-roster-contact" and contact.avatar is not None:
+            await self._publish_avatar(owner_jid, contact)
+
+    async def _publish_avatar(self, owner_jid: str, contact: Contact) -> None:
+        avatar = contact.avatar
+        if avatar is None:
+            return
+        avatar_id = avatar.version or avatar.reference
+        message = ET.Element(
+            "message",
+            {
+                "from": self._addresses.contact_jid(contact.id),
+                "to": owner_jid,
+                "type": "headline",
+            },
+        )
+        event = ET.SubElement(message, "{{{}}}event".format(PUBSUB_EVENT_NS))
+        items = ET.SubElement(
+            event,
+            "{{{}}}items".format(PUBSUB_EVENT_NS),
+            {"node": PUBSUB_AVATAR_METADATA_NS},
+        )
+        item = ET.SubElement(
+            items, "{{{}}}item".format(PUBSUB_EVENT_NS), {"id": avatar_id}
+        )
+        metadata = ET.SubElement(
+            item, "{{{}}}metadata".format(PUBSUB_AVATAR_METADATA_NS)
+        )
+        ET.SubElement(
+            metadata,
+            "info",
+            {
+                "bytes": str(max(avatar.size, 0)),
+                "id": avatar_id,
+                "type": avatar.content_type,
+                "url": avatar.reference,
+            },
+        )
+        await self._wire.send(message)

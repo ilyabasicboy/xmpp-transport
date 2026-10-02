@@ -33,6 +33,8 @@ class RemoteAccount:
 class Avatar:
     reference: str
     version: Optional[str] = None
+    content_type: str = "image/jpeg"
+    size: int = 0
 
 
 @dataclass(frozen=True)

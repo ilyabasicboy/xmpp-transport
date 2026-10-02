@@ -1,5 +1,6 @@
 """Xabber Groups protocol adapter for transport-owned conversations."""
 
+import logging
 from typing import Protocol
 from xml.etree import ElementTree as ET
 
@@ -7,7 +8,12 @@ from xmpp_transport.domain.identifiers import BindingId
 from xmpp_transport.domain.models import Conversation
 from xmpp_transport.ports.repositories import BindingRepository
 
-from .namespaces import GROUPS_NS, NICK_NS, STANZAS_NS
+from .namespaces import GROUPS_NS, NICK_NS, PUBSUB_AVATAR_METADATA_NS, STANZAS_NS
+
+
+log = logging.getLogger(__name__)
+
+GROUP_AVATAR_MAX_BYTES = 524288
 
 
 class GroupWire(Protocol):
@@ -49,6 +55,7 @@ class XmppGroupManager:
         group_jid = "{}@{}".format(localpart, self._server_domain)
         signature = (
             conversation.title,
+            self._avatar_signature(conversation),
             tuple(
                 (str(participant.id), participant.display_name)
                 for participant in conversation.participants
@@ -75,6 +82,17 @@ class XmppGroupManager:
         update = ET.Element("{{{}}}info".format(GROUPS_NS))
         ET.SubElement(update, "name").text = conversation.title
         await self._request(group_jid, update)
+        if conversation.avatar is not None:
+            try:
+                await self._update_avatar(group_jid, conversation)
+            except Exception:
+                log.warning(
+                    "XEP-GROUPS avatar update failed; continuing group sync "
+                    "binding_id=%s group_jid=%s",
+                    binding_id,
+                    group_jid,
+                    exc_info=True,
+                )
         await self._ensure_member(
             owner_jid,
             group_jid,
@@ -104,6 +122,34 @@ class XmppGroupManager:
                 auto_join=True,
             )
         self._ensured_groups[(owner_jid, group_jid)] = signature
+
+    async def _update_avatar(
+        self, group_jid: str, conversation: Conversation
+    ) -> None:
+        avatar = conversation.avatar
+        if avatar is None:
+            return
+        avatar_id = avatar.version or avatar.reference
+        info = ET.Element("{{{}}}info".format(GROUPS_NS))
+        avatar_element = ET.SubElement(info, "avatar")
+        ET.SubElement(
+            avatar_element,
+            "{{{}}}info".format(PUBSUB_AVATAR_METADATA_NS),
+            {
+                "bytes": str(avatar.size if avatar.size > 0 else GROUP_AVATAR_MAX_BYTES),
+                "id": avatar_id,
+                "type": avatar.content_type,
+                "url": avatar.reference,
+            },
+        )
+        await self._request(group_jid, info)
+
+    @staticmethod
+    def _avatar_signature(conversation: Conversation):  # type: ignore[no-untyped-def]
+        avatar = conversation.avatar
+        if avatar is None:
+            return None
+        return (avatar.version, avatar.reference, avatar.content_type, avatar.size)
 
     async def _ensure_member(
         self,

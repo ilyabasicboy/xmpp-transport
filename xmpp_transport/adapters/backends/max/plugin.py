@@ -495,7 +495,12 @@ class MaxBackendSession:
                             id=RemoteObjectId(direct_chat_id),
                             display_name=member.title,
                             avatar=(
-                                Avatar(member.avatar.url, member.avatar.avatar_id)
+                                Avatar(
+                                    member.avatar.url,
+                                    member.avatar.avatar_id,
+                                    member.avatar.mime_type,
+                                    member.avatar.bytes,
+                                )
                                 if member.avatar is not None
                                 else None
                             ),
@@ -511,7 +516,12 @@ class MaxBackendSession:
                     id=RemoteObjectId(chat.chat_id),
                     display_name=chat.title,
                     avatar=(
-                        Avatar(chat.avatar.url, chat.avatar.avatar_id)
+                        Avatar(
+                            chat.avatar.url,
+                            chat.avatar.avatar_id,
+                            chat.avatar.mime_type,
+                            chat.avatar.bytes,
+                        )
                         if chat.avatar is not None
                         else None
                     ),
@@ -536,7 +546,12 @@ class MaxBackendSession:
                         for member in chat.members
                     ),
                     avatar=(
-                        Avatar(chat.avatar.url, chat.avatar.avatar_id)
+                        Avatar(
+                            chat.avatar.url,
+                            chat.avatar.avatar_id,
+                            chat.avatar.mime_type,
+                            chat.avatar.bytes,
+                        )
                         if chat.avatar is not None
                         else None
                     ),
@@ -551,7 +566,12 @@ class MaxBackendSession:
             id=RemoteObjectId(contact.chat_id),
             display_name=contact.title,
             avatar=(
-                Avatar(contact.avatar.url, contact.avatar.avatar_id)
+                Avatar(
+                    contact.avatar.url,
+                    contact.avatar.avatar_id,
+                    contact.avatar.mime_type,
+                    contact.avatar.bytes,
+                )
                 if contact.avatar is not None
                 else None
             ),

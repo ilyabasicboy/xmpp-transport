@@ -5,7 +5,7 @@ from xml.etree import ElementTree as ET
 from xmpp_transport.adapters.xmpp.groups import XmppGroupManager
 from xmpp_transport.adapters.xmpp.namespaces import GROUPS_NS
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
-from xmpp_transport.domain.models import Conversation, ConversationKind, Participant
+from xmpp_transport.domain.models import Avatar, Conversation, ConversationKind, Participant
 from xmpp_transport.ports.repositories import BindingRecord
 
 
@@ -107,6 +107,40 @@ class XmppGroupManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(5, len(wire.requests))
         self.assertEqual(4, len(wire.sent))
 
+
+    async def test_updates_group_avatar_with_external_metadata(self) -> None:
+        wire = FakeWire()
+        manager = XmppGroupManager(
+            wire,  # type: ignore[arg-type]
+            FakeBindings(),  # type: ignore[arg-type]
+            "max.example.com",
+            "example.com",
+            "bot",
+            "maxg",
+            "MAX",
+        )
+        await manager.ensure_group(
+            BindingId("binding-1"),
+            Conversation(
+                RemoteObjectId("-888"),
+                ConversationKind.GROUP,
+                "MAX Group",
+                avatar=Avatar(
+                    "https://max.example/avatar.jpg",
+                    "avatar-id",
+                    "image/jpeg",
+                ),
+            ),
+        )
+
+        avatar_iq = wire.requests[2]
+        info = avatar_iq.find(".//{urn:xmpp:avatar:metadata}info")
+        self.assertIsNotNone(info)
+        assert info is not None
+        self.assertEqual("524288", info.attrib["bytes"])
+        self.assertEqual("avatar-id", info.attrib["id"])
+        self.assertEqual("image/jpeg", info.attrib["type"])
+        self.assertEqual("https://max.example/avatar.jpg", info.attrib["url"])
 
 if __name__ == "__main__":
     unittest.main()
