@@ -26,6 +26,7 @@ from xmpp_transport.domain.models import (
     ConversationKind,
     IncomingMessage,
     OutgoingMessage,
+    ForwardReference,
     Participant,
     Media,
     MediaKind,
@@ -74,6 +75,9 @@ class TelegramClient(Protocol):
         ...
 
     async def send_file(self, entity, file, **kwargs):  # type: ignore[no-untyped-def]
+        ...
+
+    async def forward_messages(self, entity, messages, from_peer):  # type: ignore[no-untyped-def]
         ...
 
     async def download_media(self, message, file=bytes):  # type: ignore[no-untyped-def]
@@ -243,9 +247,19 @@ class TelegramBackendSession:
             raise InvalidCommand("message belongs to another binding")
         peer_id = self._peer_id(message.conversation_id)
         entity = await self._resolve_entity(peer_id)
-        reply_to = int(message.reply_to.message_id) if message.reply_to is not None else None
+        reply_to = int(str(message.reply_to.message_id)) if message.reply_to is not None else None
         if message.media:
             sent = await self._send_media(entity, message, reply_to)
+        elif message.forwarded_from is not None and reply_to is None:
+            try:
+                sent = await self._send_forward(entity, message)
+            except Exception:
+                log.debug("Telegram native forward failed; using fallback", exc_info=True)
+                sent = None
+            if sent is None:
+                sent = await self._client.send_message(
+                    entity, self._forward_fallback(message)
+                )
         else:
             sent = await self._client.send_message(
                 entity,
@@ -262,6 +276,68 @@ class TelegramBackendSession:
             if len(self._sent_group_messages) > 1024:
                 self._sent_group_messages.pop()
         return SendResult(RemoteObjectId(str(message_id)))
+
+    async def _send_forward(
+        self, entity, message: OutgoingMessage
+    ):  # type: ignore[no-untyped-def]
+        reference = message.forwarded_from
+        if reference is None or reference.source_message_id is None:
+            return None
+        source_peer_id = self._forward_source_peer_id(reference)
+        if source_peer_id is None:
+            return None
+        source = await self._resolve_entity(source_peer_id)
+        sent = await self._client.forward_messages(
+            entity,
+            int(str(reference.source_message_id)),
+            from_peer=source,
+        )
+        if isinstance(sent, list):
+            sent = sent[-1] if sent else None
+        if message.text:
+            await self._client.send_message(entity, message.text)
+        return sent
+
+    @classmethod
+    def _forward_source_peer_id(
+        cls, reference: ForwardReference
+    ) -> Optional[int]:
+        if reference.source_conversation_id is not None:
+            try:
+                return int(str(reference.source_conversation_id))
+            except ValueError:
+                pass
+        for value in (reference.source_name, reference.source_recipient):
+            localpart = str(value or "").split("@", 1)[0]
+            if localpart.startswith("chat-"):
+                try:
+                    return int(localpart[5:])
+                except ValueError:
+                    continue
+            if localpart.startswith("telegramg-"):
+                payload = localpart[10:]
+                _owner_hex, separator, chat_id = payload.partition("-")
+                if not separator or not chat_id:
+                    continue
+                try:
+                    return int(chat_id)
+                except ValueError:
+                    continue
+        return None
+
+    @staticmethod
+    def _forward_fallback(message: OutgoingMessage) -> str:
+        reference = message.forwarded_from
+        parts = []
+        if reference is not None:
+            if reference.source_name:
+                parts.append("Forwarded from {}".format(reference.source_name))
+            if reference.body:
+                parts.append(reference.body)
+            parts.extend(item.source_url for item in reference.media if item.source_url)
+        if message.text:
+            parts.append(message.text)
+        return "\n\n".join(parts)
 
     async def _send_media(
         self, entity, message: OutgoingMessage, reply_to
@@ -459,6 +535,7 @@ class TelegramBackendSession:
             return
         body = str(getattr(event, "raw_text", "") or "").strip()
         media = tuple(await self._incoming_media(event))
+        forwarded = self._incoming_forward(event, body, media)
         if not body and not media:
             return
         peer_id = getattr(event, "chat_id", None) or getattr(event, "sender_id", None)
@@ -487,8 +564,9 @@ class TelegramBackendSession:
                     conversation_id=RemoteObjectId(str(peer_id)),
                     sender_id=RemoteObjectId(str(sender_id)),
                     occurred_at=self._event_date(event),
-                    text=body or None,
+                    text=None if forwarded is not None else body or None,
                     media=media,
+                    forwarded_from=forwarded,
                     reply_to=(
                         ReplyReference(RemoteObjectId(str(reply_id)))
                         if reply_id is not None
@@ -499,6 +577,59 @@ class TelegramBackendSession:
             )
         )
 
+
+    def _incoming_forward(
+        self, event, body: str, media: Sequence[Media]
+    ) -> Optional[ForwardReference]:  # type: ignore[no-untyped-def]
+        message = getattr(event, "message", None)
+        header = getattr(message, "fwd_from", None) if message is not None else None
+        if header is None:
+            return None
+        source_peer_id = self._forward_peer_id(header)
+        source_name = str(getattr(header, "from_name", "") or "").strip() or None
+        source_message_id = None
+        for name in ("saved_from_msg_id", "channel_post"):
+            value = getattr(header, name, None)
+            if value is not None:
+                source_message_id = RemoteObjectId(str(value))
+                break
+        forwarded_body = body or None
+        if source_peer_id is None and source_name and forwarded_body:
+            forwarded_body = "Forwarded from {}\n{}".format(
+                source_name, forwarded_body
+            )
+        if source_peer_id is None and source_name is None:
+            return None
+        return ForwardReference(
+            source_name=None,
+            source_message_id=source_message_id,
+            source_conversation_id=(
+                RemoteObjectId(str(source_peer_id))
+                if source_peer_id is not None
+                else None
+            ),
+            sender_id=(
+                RemoteObjectId(str(source_peer_id))
+                if source_peer_id is not None and source_peer_id >= 0
+                else None
+            ),
+            body=forwarded_body,
+            media=tuple(media),
+        )
+
+    @classmethod
+    def _forward_peer_id(cls, header) -> Optional[int]:  # type: ignore[no-untyped-def]
+        for name in ("saved_from_peer", "from_id"):
+            peer = getattr(header, name, None)
+            if peer is None:
+                continue
+            if getattr(peer, "user_id", None) is not None:
+                return int(peer.user_id)
+            if getattr(peer, "chat_id", None) is not None:
+                return -int(peer.chat_id)
+            if getattr(peer, "channel_id", None) is not None:
+                return int("-100{}".format(peer.channel_id))
+        return None
 
     async def _incoming_media(self, event) -> Sequence[Media]:  # type: ignore[no-untyped-def]
         message = getattr(event, "message", None)

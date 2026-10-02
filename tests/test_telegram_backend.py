@@ -14,7 +14,14 @@ from xmpp_transport.domain.events import (
     SessionStateChanged,
 )
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
-from xmpp_transport.domain.models import ConversationKind, Media, MediaKind, OutgoingMessage
+from xmpp_transport.domain.models import (
+    ConversationKind,
+    ForwardReference,
+    Media,
+    MediaKind,
+    OutgoingMessage,
+    ReplyReference,
+)
 from xmpp_transport.ports.backend import ConversationSource, ContactSource, MessageSender
 
 
@@ -75,6 +82,7 @@ class FakeClient:
         ]
         self.sent = []
         self.sent_files = []
+        self.forwarded = []
         self.downloaded_media = b"telegram-media"
 
     async def connect(self):  # type: ignore[no-untyped-def]
@@ -112,6 +120,10 @@ class FakeClient:
     async def send_file(self, entity, file, **kwargs):  # type: ignore[no-untyped-def]
         self.sent_files.append((entity.id, file, kwargs))
         return type("Sent", (), {"id": 778})()
+
+    async def forward_messages(self, entity, messages, from_peer):  # type: ignore[no-untyped-def]
+        self.forwarded.append((entity.id, messages, from_peer.id))
+        return type("Sent", (), {"id": 779})()
 
     async def download_media(self, message, file=bytes):  # type: ignore[no-untyped-def]
         return self.downloaded_media
@@ -231,6 +243,84 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(received))
         self.assertEqual("hello from Telegram", received[0].message.text)
         self.assertEqual(RemoteObjectId("44"), received[0].message.reply_to.message_id)
+
+    async def test_sends_reply_to_telegram_message(self) -> None:
+        await self.session.start()
+        await self.session.features()[MessageSender].send_message(
+            OutgoingMessage(
+                "client-reply",
+                BindingId("binding-1"),
+                RemoteObjectId("200"),
+                text="reply",
+                reply_to=ReplyReference(RemoteObjectId("44")),
+            )
+        )
+
+        self.assertEqual((200, "reply", 44), self.client.sent[-1])
+
+    async def test_sends_native_forward_and_outer_comment(self) -> None:
+        await self.session.start()
+        result = await self.session.features()[MessageSender].send_message(
+            OutgoingMessage(
+                "client-forward",
+                BindingId("binding-1"),
+                RemoteObjectId("200"),
+                text="comment",
+                forwarded_from=ForwardReference(
+                    source_message_id=RemoteObjectId("55"),
+                    source_conversation_id=RemoteObjectId("100"),
+                    body="forwarded text",
+                ),
+            )
+        )
+
+        self.assertEqual(RemoteObjectId("779"), result.remote_message_id)
+        self.assertEqual([(200, 55, 100)], self.client.forwarded)
+        self.assertEqual((200, "comment", None), self.client.sent[-1])
+
+    async def test_falls_back_when_forward_source_is_hidden(self) -> None:
+        await self.session.start()
+        await self.session.features()[MessageSender].send_message(
+            OutgoingMessage(
+                "client-hidden-forward",
+                BindingId("binding-1"),
+                RemoteObjectId("200"),
+                forwarded_from=ForwardReference(
+                    source_name="Hidden Sender",
+                    body="forwarded text",
+                ),
+            )
+        )
+
+        self.assertEqual(
+            "Forwarded from Hidden Sender\n\nforwarded text",
+            self.client.sent[-1][1],
+        )
+
+    async def test_maps_incoming_forward_header(self) -> None:
+        await self.session.start()
+        peer = type("PeerUser", (), {"user_id": 300})()
+        header = type(
+            "ForwardHeader", (),
+            {"from_id": peer, "saved_from_peer": None, "saved_from_msg_id": 54, "channel_post": None, "from_name": None},
+        )()
+        message = type(
+            "Message", (),
+            {"reply_to_msg_id": None, "media": None, "fwd_from": header},
+        )()
+        event = type(
+            "Event", (),
+            {"out": False, "is_private": True, "raw_text": "forwarded text", "chat_id": 100, "sender_id": 100, "id": 58, "date": datetime.now(timezone.utc), "message": message},
+        )()
+
+        await self.client.handler(event)
+
+        received = [item for item in self.sink.events if isinstance(item, MessageReceived)]
+        forwarded = received[-1].message.forwarded_from
+        self.assertIsNone(received[-1].message.text)
+        self.assertEqual(RemoteObjectId("300"), forwarded.source_conversation_id)
+        self.assertEqual(RemoteObjectId("54"), forwarded.source_message_id)
+        self.assertEqual("forwarded text", forwarded.body)
 
     async def test_sends_image_and_voice_media(self) -> None:
         await self.session.start()
