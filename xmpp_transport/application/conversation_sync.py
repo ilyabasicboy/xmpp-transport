@@ -10,7 +10,10 @@ class ConversationSync:
         self._groups = groups
 
     async def handle(self, event: ConversationChanged) -> None:
-        if event.conversation.kind is not ConversationKind.GROUP:
+        if event.conversation.kind not in (
+            ConversationKind.GROUP,
+            ConversationKind.CHANNEL,
+        ):
             return
         await self._groups.ensure_group(
             event.envelope.binding_id,

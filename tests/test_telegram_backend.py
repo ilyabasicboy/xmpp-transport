@@ -50,11 +50,18 @@ class FakeQr:
 
 
 class User:
-    def __init__(self, user_id, first_name, last_name="", username=None):  # type: ignore[no-untyped-def]
+    def __init__(
+        self, user_id, first_name, last_name="", username=None, photo_id=None
+    ):  # type: ignore[no-untyped-def]
         self.id = user_id
         self.first_name = first_name
         self.last_name = last_name
         self.username = username
+        self.photo = (
+            type("Photo", (), {"photo_id": photo_id})()
+            if photo_id is not None
+            else None
+        )
 
 
 class Dialog:
@@ -74,16 +81,19 @@ class FakeClient:
         self.connected = 0
         self.disconnected = 0
         self.handler = None
-        self.users = [User(100, "Alice", username="alice")]
+        self.users = [User(100, "Alice", username="alice", photo_id=123)]
         self.dialogs = [
             Dialog(200, "Test Bot", User(200, "Test Bot", username="test_bot")),
-            Dialog(-300, "Group", User(-300, "Group"), is_group=True),
+            Dialog(
+                -300, "Group", User(-300, "Group", photo_id=777), is_group=True
+            ),
             Dialog(-400, "News", User(-400, "News"), is_channel=True),
         ]
         self.sent = []
         self.sent_files = []
         self.forwarded = []
         self.downloaded_media = b"telegram-media"
+        self.downloaded_avatars = []
 
     async def connect(self):  # type: ignore[no-untyped-def]
         self.connected += 1
@@ -124,6 +134,12 @@ class FakeClient:
     async def forward_messages(self, entity, messages, from_peer):  # type: ignore[no-untyped-def]
         self.forwarded.append((entity.id, messages, from_peer.id))
         return type("Sent", (), {"id": 779})()
+
+    async def download_profile_photo(
+        self, entity, file=bytes, download_big=False
+    ):  # type: ignore[no-untyped-def]
+        self.downloaded_avatars.append((entity.id, download_big))
+        return b"telegram-avatar"
 
     async def download_media(self, message, file=bytes):  # type: ignore[no-untyped-def]
         return self.downloaded_media
@@ -218,7 +234,7 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(200, "hello", None)], self.client.sent)
         changes = [event for event in self.sink.events if isinstance(event, ContactChanged)]
         self.assertEqual(2, len(changes))
-        self.assertTrue(all(event.force for event in changes))
+        self.assertTrue(all(not event.force for event in changes))
 
     async def test_publishes_incoming_private_text(self) -> None:
         await self.session.start()
@@ -243,6 +259,43 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(received))
         self.assertEqual("hello from Telegram", received[0].message.text)
         self.assertEqual(RemoteObjectId("44"), received[0].message.reply_to.message_id)
+
+    async def test_syncs_contact_and_group_avatars(self) -> None:
+        await self.session.start()
+
+        contacts = await self.session.features()[ContactSource].contacts()
+        conversations = await self.session.features()[ConversationSource].conversations()
+        alice = next(item for item in contacts if item.id == RemoteObjectId("100"))
+        group = next(item for item in conversations if item.id == RemoteObjectId("-300"))
+
+        self.assertEqual("123", alice.avatar.version)
+        self.assertEqual("777", group.avatar.version)
+        self.assertEqual(alice.avatar.reference, (await self.session.contacts())[0].avatar.reference)
+        token = alice.avatar.reference.split("/media/", 1)[1].split("/", 1)[0]
+        request = type("Request", (), {"match_info": {"token": token}})()
+        response = await self.plugin.media_handler(request)
+        self.assertEqual(b"telegram-avatar", response.body)
+        self.assertEqual([(100, False)], self.client.downloaded_avatars)
+
+    async def test_updates_group_avatar_from_service_event(self) -> None:
+        await self.session.start()
+        action = type("MessageActionChatEditPhoto", (), {})()
+        event = GroupEvent()
+        event.raw_text = ""
+        event.message = type("Message", (), {"action": action})()
+
+        async def get_chat():
+            return User(-300, "Group", photo_id=888)
+
+        event.get_chat = get_chat
+        await self.client.handler(event)
+
+        conversations = [
+            item.conversation
+            for item in self.sink.events
+            if isinstance(item, ConversationChanged)
+        ]
+        self.assertEqual("888", conversations[-1].avatar.version)
 
     async def test_sends_reply_to_telegram_message(self) -> None:
         await self.session.start()

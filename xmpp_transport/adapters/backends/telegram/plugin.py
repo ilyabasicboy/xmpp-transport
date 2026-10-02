@@ -1,9 +1,12 @@
 """Telethon-backed Telegram adapter preserving the original transport behavior."""
 
 import asyncio
+import hashlib
 import logging
-from datetime import datetime, timezone
 import secrets
+from datetime import datetime, timezone
+from typing import Callable, Mapping, Optional, Protocol, Sequence
+from urllib.parse import quote
 from urllib.parse import quote
 from typing import Callable, Mapping, Optional, Protocol, Sequence
 from uuid import uuid4
@@ -21,6 +24,7 @@ from xmpp_transport.domain.events import (
 )
 from xmpp_transport.domain.identifiers import BackendId, BindingId, EventId, RemoteObjectId
 from xmpp_transport.domain.models import (
+    Avatar,
     Contact,
     Conversation,
     ConversationKind,
@@ -78,6 +82,11 @@ class TelegramClient(Protocol):
         ...
 
     async def forward_messages(self, entity, messages, from_peer):  # type: ignore[no-untyped-def]
+        ...
+
+    async def download_profile_photo(
+        self, entity, file=bytes, download_big=False
+    ):  # type: ignore[no-untyped-def]
         ...
 
     async def download_media(self, message, file=bytes):  # type: ignore[no-untyped-def]
@@ -177,10 +186,12 @@ class TelegramBackendSession:
         event_sink: BackendEventSink,
         client_factory: TelegramClientFactory,
         media_register: Callable[[TelegramClient, object, str, str], str],
+        avatar_register: Callable[[TelegramClient, object, str], str],
     ) -> None:
         self._binding_id = binding_id
         self._event_sink = event_sink
         self._media_register = media_register
+        self._avatar_register = avatar_register
         self._client = client_factory(session_data)
         self._started = False
         self._closed = False
@@ -437,13 +448,24 @@ class TelegramBackendSession:
                 downloaded.append(path)
         return downloaded
 
+    def _avatar(self, entity) -> Optional[Avatar]:  # type: ignore[no-untyped-def]
+        photo = getattr(entity, "photo", None)
+        photo_id = getattr(photo, "photo_id", None)
+        if photo_id is None:
+            return None
+        version = str(photo_id)
+        return Avatar(
+            reference=self._avatar_register(self._client, entity, version),
+            version=version,
+            content_type="image/jpeg",
+        )
+
     async def _synchronize_contacts(self) -> None:
         for contact in await self._list_contacts():
             await self._event_sink.publish(
                 ContactChanged(
                     envelope=self._envelope(ContactChanged.EVENT_TYPE),
                     contact=contact,
-                    force=True,
                 )
             )
 
@@ -469,6 +491,7 @@ class TelegramBackendSession:
                         else ConversationKind.GROUP
                     ),
                     title=dialog.name or "Telegram group {}".format(peer_id),
+                    avatar=self._avatar(dialog.entity),
                     attributes=self._conversation_attributes(),
                 )
                 self._conversations[peer_id] = conversation
@@ -486,6 +509,7 @@ class TelegramBackendSession:
                 RemoteObjectId(str(peer_id)),
                 self._user_title(user),
                 username=getattr(user, "username", None),
+                avatar=self._avatar(user),
             )
         async for dialog in self._client.iter_dialogs():
             if bool(getattr(dialog, "is_group", False)) or bool(
@@ -498,6 +522,7 @@ class TelegramBackendSession:
                     RemoteObjectId(str(peer_id)),
                     dialog.name or self._user_title(dialog.entity),
                     username=getattr(dialog.entity, "username", None),
+                    avatar=self._avatar(dialog.entity),
                 )
         return tuple(sorted(contacts.values(), key=lambda item: item.display_name.casefold()))
 
@@ -532,6 +557,14 @@ class TelegramBackendSession:
     async def _receive_message(self, event) -> None:  # type: ignore[no-untyped-def]
         is_group = self._is_group_event(event)
         if getattr(event, "out", False) and not is_group:
+            return
+        if is_group and self._is_avatar_update_event(event):
+            peer_id = getattr(event, "chat_id", None)
+            if peer_id is not None:
+                sender_id = getattr(event, "sender_id", None) or self._owner_id or peer_id
+                await self._update_group_from_event(
+                    event, int(peer_id), int(sender_id)
+                )
             return
         body = str(getattr(event, "raw_text", "") or "").strip()
         media = tuple(await self._incoming_media(event))
@@ -720,6 +753,11 @@ class TelegramBackendSession:
                 existing.title if existing else "Telegram group {}".format(peer_id),
             ),
             participants=tuple(participants.values()),
+            avatar=(
+                self._avatar(chat)
+                if chat is not None
+                else (existing.avatar if existing else None)
+            ),
             attributes=self._conversation_attributes(),
         )
         await self._publish_conversation(conversation)
@@ -737,6 +775,14 @@ class TelegramBackendSession:
         if self._owner_id is None:
             return {}
         return {"owner_remote_id": str(self._owner_id)}
+
+    @staticmethod
+    def _is_avatar_update_event(event) -> bool:  # type: ignore[no-untyped-def]
+        action = getattr(getattr(event, "message", None), "action", None)
+        return action is not None and action.__class__.__name__ in {
+            "MessageActionChatEditPhoto",
+            "MessageActionChatDeletePhoto",
+        }
 
     @staticmethod
     def _is_group_event(event) -> bool:  # type: ignore[no-untyped-def]
@@ -870,17 +916,38 @@ class TelegramBackendPlugin:
             event_sink,
             self._create_client,
             self._register_media,
+            lambda client, entity, photo_id: self._register_avatar(
+                binding_id, client, entity, photo_id
+            ),
         )
 
     def _register_media(
         self, client: TelegramClient, message, mime_type: str, file_name: str
     ) -> str:  # type: ignore[no-untyped-def]
         token = secrets.token_urlsafe(24)
-        self._media_references[token] = (client, message, mime_type, file_name)
+        self._media_references[token] = (
+            "media", client, message, mime_type, file_name
+        )
         if len(self._media_references) > 4096:
             self._media_references.pop(next(iter(self._media_references)))
         return "{}/media/{}/{}".format(
             self._media_base_url.rstrip("/"), token, quote(file_name)
+        )
+
+    def _register_avatar(
+        self,
+        binding_id: BindingId,
+        client: TelegramClient,
+        entity,
+        photo_id: str,
+    ) -> str:  # type: ignore[no-untyped-def]
+        key = (str(binding_id), str(getattr(entity, "id", "unknown")), photo_id)
+        token = hashlib.sha256("|".join(key).encode("utf-8")).hexdigest()
+        self._media_references[token] = (
+            "avatar", client, entity, "image/jpeg", "avatar-{}.jpg".format(photo_id)
+        )
+        return "{}/media/{}/avatar-{}.jpg".format(
+            self._media_base_url.rstrip("/"), token, quote(photo_id)
         )
 
     async def media_handler(self, request):  # type: ignore[no-untyped-def]
@@ -889,12 +956,17 @@ class TelegramBackendPlugin:
         reference = self._media_references.get(request.match_info["token"])
         if reference is None:
             raise web.HTTPNotFound()
-        client, message, mime_type, file_name = reference
-        content = await client.download_media(message, file=bytes)
-        if not content:
-            raise web.HTTPNotFound()
+        kind, client, value, mime_type, file_name = reference
+        if kind == "avatar":
+            content = await client.download_profile_photo(
+                value, file=bytes, download_big=False
+            )
+        else:
+            content = await client.download_media(value, file=bytes)
         safe_name = file_name.replace("\\", "_").replace('"', "_")
         safe_name = safe_name.replace("\r", "_").replace("\n", "_")
+        if not content:
+            raise web.HTTPNotFound()
         return web.Response(
             body=content,
             headers={
