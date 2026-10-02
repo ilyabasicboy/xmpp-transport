@@ -6,10 +6,16 @@ from xmpp_transport.adapters.backends.telegram import (
     TelegramBackendPlugin,
 )
 from xmpp_transport.domain.auth import AuthResponse, AuthResponseKind, AuthState
-from xmpp_transport.domain.events import ContactChanged, MessageReceived, SessionState, SessionStateChanged
+from xmpp_transport.domain.events import (
+    ContactChanged,
+    ConversationChanged,
+    MessageReceived,
+    SessionState,
+    SessionStateChanged,
+)
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
-from xmpp_transport.domain.models import OutgoingMessage
-from xmpp_transport.ports.backend import ContactSource, MessageSender
+from xmpp_transport.domain.models import ConversationKind, OutgoingMessage
+from xmpp_transport.ports.backend import ConversationSource, ContactSource, MessageSender
 
 
 class PasswordRequired(RuntimeError):
@@ -65,6 +71,7 @@ class FakeClient:
         self.dialogs = [
             Dialog(200, "Test Bot", User(200, "Test Bot", username="test_bot")),
             Dialog(-300, "Group", User(-300, "Group"), is_group=True),
+            Dialog(-400, "News", User(-400, "News"), is_channel=True),
         ]
         self.sent = []
 
@@ -102,6 +109,25 @@ class FakeClient:
 
     def add_event_handler(self, handler, event_builder):  # type: ignore[no-untyped-def]
         self.handler = handler
+
+
+class GroupEvent:
+    out = False
+    is_private = False
+    is_group = True
+    is_channel = False
+    raw_text = "hello group"
+    chat_id = -300
+    sender_id = 300
+    id = 56
+    date = datetime.now(timezone.utc)
+    message = type("Message", (), {"reply_to_msg_id": None})()
+
+    async def get_chat(self):  # type: ignore[no-untyped-def]
+        return type("Chat", (), {"title": "Group"})()
+
+    async def get_sender(self):  # type: ignore[no-untyped-def]
+        return User(300, "Bob")
 
 
 class Sink:
@@ -196,6 +222,57 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(received))
         self.assertEqual("hello from Telegram", received[0].message.text)
         self.assertEqual(RemoteObjectId("44"), received[0].message.reply_to.message_id)
+
+    async def test_syncs_groups_and_sends_group_text(self) -> None:
+        await self.session.start()
+
+        conversations = await self.session.features()[
+            ConversationSource
+        ].conversations()
+        result = await self.session.features()[MessageSender].send_message(
+            OutgoingMessage(
+                "client-group",
+                BindingId("binding-1"),
+                RemoteObjectId("-300"),
+                text="hello group",
+            )
+        )
+
+        self.assertEqual(["Group", "News"], [item.title for item in conversations])
+        self.assertEqual(ConversationKind.GROUP, conversations[0].kind)
+        self.assertEqual(ConversationKind.CHANNEL, conversations[1].kind)
+        self.assertEqual("100", conversations[0].attributes["owner_remote_id"])
+        self.assertEqual(RemoteObjectId("777"), result.remote_message_id)
+        self.assertEqual((-300, "hello group", None), self.client.sent[-1])
+        echo = GroupEvent()
+        echo.out = True
+        echo.sender_id = 100
+        echo.id = 777
+        before = len(
+            [item for item in self.sink.events if isinstance(item, MessageReceived)]
+        )
+        await self.client.handler(echo)
+        after = len(
+            [item for item in self.sink.events if isinstance(item, MessageReceived)]
+        )
+        self.assertEqual(before, after)
+
+    async def test_publishes_incoming_group_message_and_sender(self) -> None:
+        await self.session.start()
+
+        await self.client.handler(GroupEvent())
+
+        received = [item for item in self.sink.events if isinstance(item, MessageReceived)]
+        message = received[-1].message
+        self.assertEqual(RemoteObjectId("-300"), message.conversation_id)
+        self.assertEqual(RemoteObjectId("300"), message.sender_id)
+        self.assertEqual("true", message.attributes["is_group"])
+        conversations = [
+            item.conversation
+            for item in self.sink.events
+            if isinstance(item, ConversationChanged)
+        ]
+        self.assertEqual("Bob", conversations[-1].participants[0].display_name)
 
     async def test_lifecycle_is_idempotent(self) -> None:
         await self.session.start()

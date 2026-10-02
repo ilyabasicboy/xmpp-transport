@@ -11,14 +11,28 @@ from xmpp_transport.domain.errors import AuthorizationRequired, BackendUnavailab
 from xmpp_transport.domain.events import (
     AuthorizationLost,
     ContactChanged,
+    ConversationChanged,
     EventEnvelope,
     MessageReceived,
     SessionState,
     SessionStateChanged,
 )
 from xmpp_transport.domain.identifiers import BackendId, BindingId, EventId, RemoteObjectId
-from xmpp_transport.domain.models import Contact, IncomingMessage, OutgoingMessage, ReplyReference
-from xmpp_transport.ports.backend import ContactSource, MessageSender, SendResult
+from xmpp_transport.domain.models import (
+    Contact,
+    Conversation,
+    ConversationKind,
+    IncomingMessage,
+    OutgoingMessage,
+    Participant,
+    ReplyReference,
+)
+from xmpp_transport.ports.backend import (
+    ContactSource,
+    ConversationSource,
+    MessageSender,
+    SendResult,
+)
 from xmpp_transport.ports.events import BackendEventSink
 
 
@@ -154,6 +168,9 @@ class TelegramBackendSession:
         self._client = client_factory(session_data)
         self._started = False
         self._closed = False
+        self._owner_id: Optional[int] = None
+        self._conversations = {}
+        self._sent_group_messages = set()
 
     @property
     def binding_id(self) -> BindingId:
@@ -175,9 +192,12 @@ class TelegramBackendSession:
                     )
                 )
                 raise AuthorizationRequired("Telegram session expired")
+            owner = await self._client.get_me()
+            self._owner_id = int(owner.id)
             self._install_message_handler()
             self._started = True
             await self._synchronize_contacts()
+            await self._synchronize_conversations()
         except Exception as exc:
             await self._publish_state(SessionState.FAILED, type(exc).__name__)
             raise BackendUnavailable("Telegram session failed to start") from exc
@@ -192,10 +212,17 @@ class TelegramBackendSession:
         await self._publish_state(SessionState.STOPPED)
 
     def features(self) -> Mapping[type, object]:
-        return {MessageSender: self, ContactSource: self}
+        return {
+            MessageSender: self,
+            ContactSource: self,
+            ConversationSource: self,
+        }
 
     async def contacts(self) -> Sequence[Contact]:
         return tuple(await self._list_contacts())
+
+    async def conversations(self) -> Sequence[Conversation]:
+        return tuple(await self._list_conversations())
 
     async def send_message(self, message: OutgoingMessage) -> SendResult:
         if not self._started or self._closed:
@@ -203,7 +230,7 @@ class TelegramBackendSession:
         if message.binding_id != self._binding_id:
             raise InvalidCommand("message belongs to another binding")
         peer_id = self._peer_id(message.conversation_id)
-        entity = await self._resolve_direct_entity(peer_id)
+        entity = await self._resolve_entity(peer_id)
         sent = await self._client.send_message(
             entity,
             message.text or "",
@@ -214,6 +241,10 @@ class TelegramBackendSession:
         message_id = getattr(sent, "id", None)
         if message_id is None:
             raise BackendUnavailable("Telegram send result did not contain a message ID")
+        if peer_id in self._conversations:
+            self._sent_group_messages.add((peer_id, int(message_id)))
+            if len(self._sent_group_messages) > 1024:
+                self._sent_group_messages.pop()
         return SendResult(RemoteObjectId(str(message_id)))
 
     async def _synchronize_contacts(self) -> None:
@@ -225,6 +256,34 @@ class TelegramBackendSession:
                     force=True,
                 )
             )
+
+    async def _synchronize_conversations(self) -> None:
+        for conversation in await self._list_conversations():
+            await self._publish_conversation(conversation)
+
+    async def _list_conversations(self) -> Sequence[Conversation]:
+        conversations = []
+        async for dialog in self._client.iter_dialogs():
+            is_group = bool(getattr(dialog, "is_group", False))
+            is_channel = bool(getattr(dialog, "is_channel", False))
+            if not is_group and not is_channel:
+                continue
+            peer_id = int(dialog.id)
+            conversation = self._conversations.get(peer_id)
+            if conversation is None:
+                conversation = Conversation(
+                    id=RemoteObjectId(str(peer_id)),
+                    kind=(
+                        ConversationKind.CHANNEL
+                        if is_channel
+                        else ConversationKind.GROUP
+                    ),
+                    title=dialog.name or "Telegram group {}".format(peer_id),
+                    attributes=self._conversation_attributes(),
+                )
+                self._conversations[peer_id] = conversation
+            conversations.append(conversation)
+        return tuple(sorted(conversations, key=lambda item: item.title.casefold()))
 
     async def _list_contacts(self) -> Sequence[Contact]:
         from telethon.tl.functions.contacts import GetContactsRequest
@@ -252,7 +311,7 @@ class TelegramBackendSession:
                 )
         return tuple(sorted(contacts.values(), key=lambda item: item.display_name.casefold()))
 
-    async def _resolve_direct_entity(self, peer_id: int):  # type: ignore[no-untyped-def]
+    async def _resolve_entity(self, peer_id: int):  # type: ignore[no-untyped-def]
         from telethon.tl.functions.contacts import GetContactsRequest
 
         result = await self._client(GetContactsRequest(hash=0))
@@ -260,14 +319,10 @@ class TelegramBackendSession:
             if int(user.id) == peer_id:
                 return user
         async for dialog in self._client.iter_dialogs():
-            if bool(getattr(dialog, "is_group", False)) or bool(
-                getattr(dialog, "is_channel", False)
-            ):
-                continue
             if int(dialog.id) == peer_id:
                 return dialog.entity
         raise BackendUnavailable(
-            "Telegram direct chat is not available. Send /sync-contacts and try again."
+            "Telegram chat is not available. Send /sync-contacts and try again."
         )
 
     def _install_message_handler(self) -> None:
@@ -285,7 +340,8 @@ class TelegramBackendSession:
         self._client.add_event_handler(handle, events.NewMessage())
 
     async def _receive_message(self, event) -> None:  # type: ignore[no-untyped-def]
-        if getattr(event, "out", False) or not getattr(event, "is_private", False):
+        is_group = self._is_group_event(event)
+        if getattr(event, "out", False) and not is_group:
             return
         body = str(getattr(event, "raw_text", "") or "").strip()
         if not body:
@@ -294,6 +350,18 @@ class TelegramBackendSession:
         message_id = getattr(event, "id", None)
         if peer_id is None or message_id is None:
             return
+        echo_key = (int(peer_id), int(message_id))
+        if getattr(event, "out", False) and is_group:
+            if echo_key in self._sent_group_messages:
+                self._sent_group_messages.discard(echo_key)
+                return
+        sender_id = self._owner_id if getattr(event, "out", False) else getattr(
+            event, "sender_id", None
+        )
+        if sender_id is None:
+            sender_id = peer_id
+        if is_group:
+            await self._update_group_from_event(event, int(peer_id), int(sender_id))
         reply_id = getattr(getattr(event, "message", None), "reply_to_msg_id", None)
         await self._event_sink.publish(
             MessageReceived(
@@ -302,7 +370,7 @@ class TelegramBackendSession:
                     id=RemoteObjectId(str(message_id)),
                     binding_id=self._binding_id,
                     conversation_id=RemoteObjectId(str(peer_id)),
-                    sender_id=RemoteObjectId(str(peer_id)),
+                    sender_id=RemoteObjectId(str(sender_id)),
                     occurred_at=self._event_date(event),
                     text=body,
                     reply_to=(
@@ -310,9 +378,70 @@ class TelegramBackendSession:
                         if reply_id is not None
                         else None
                     ),
+                    attributes={"is_group": "true"} if is_group else {},
                 ),
             )
         )
+
+    async def _update_group_from_event(
+        self, event, peer_id: int, sender_id: int
+    ) -> None:  # type: ignore[no-untyped-def]
+        existing = self._conversations.get(peer_id)
+        chat = await event.get_chat() if hasattr(event, "get_chat") else None
+        sender = await event.get_sender() if hasattr(event, "get_sender") else None
+        participants = {
+            str(item.id): item for item in (existing.participants if existing else ())
+        }
+        participants[str(sender_id)] = Participant(
+            RemoteObjectId(str(sender_id)),
+            self._entity_title(sender, "Telegram user {}".format(sender_id)),
+        )
+        conversation = Conversation(
+            id=RemoteObjectId(str(peer_id)),
+            kind=(
+                ConversationKind.CHANNEL
+                if bool(getattr(event, "is_channel", False))
+                else ConversationKind.GROUP
+            ),
+            title=self._entity_title(
+                chat,
+                existing.title if existing else "Telegram group {}".format(peer_id),
+            ),
+            participants=tuple(participants.values()),
+            attributes=self._conversation_attributes(),
+        )
+        await self._publish_conversation(conversation)
+
+    async def _publish_conversation(self, conversation: Conversation) -> None:
+        self._conversations[int(str(conversation.id))] = conversation
+        await self._event_sink.publish(
+            ConversationChanged(
+                envelope=self._envelope(ConversationChanged.EVENT_TYPE),
+                conversation=conversation,
+            )
+        )
+
+    def _conversation_attributes(self) -> Mapping[str, str]:
+        if self._owner_id is None:
+            return {}
+        return {"owner_remote_id": str(self._owner_id)}
+
+    @staticmethod
+    def _is_group_event(event) -> bool:  # type: ignore[no-untyped-def]
+        if bool(getattr(event, "is_group", False)) or bool(
+            getattr(event, "is_channel", False)
+        ):
+            return True
+        if getattr(event, "is_private", None) is False:
+            return True
+        return isinstance(getattr(event, "chat_id", None), int) and event.chat_id < 0
+
+    @classmethod
+    def _entity_title(cls, entity, fallback: str) -> str:  # type: ignore[no-untyped-def]
+        if entity is None:
+            return fallback
+        title = str(getattr(entity, "title", "") or "").strip()
+        return title or cls._user_title(entity) or fallback
 
     async def _publish_state(self, state: SessionState, detail: Optional[str] = None) -> None:
         await self._event_sink.publish(
