@@ -12,10 +12,12 @@ class AiohttpHealthServer:
         host: str,
         port: int,
         web_module: Optional[Any] = None,
+        media_handler: Optional[Any] = None,
     ) -> None:
         self._health = health
         self._host = host
         self._port = port
+        self._media_handler = media_handler
         self._web = web_module
         self._runner: Optional[Any] = None
 
@@ -29,6 +31,10 @@ class AiohttpHealthServer:
             web = aiohttp_web
             self._web = web
         application = web.Application()
+        if self._media_handler is not None:
+            application.router.add_get(
+                "/media/{token}/{filename}", self._media_handler
+            )
         application.router.add_get("/live", self._live)
         application.router.add_get("/ready", self._ready)
         runner = web.AppRunner(application)

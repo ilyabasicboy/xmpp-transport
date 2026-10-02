@@ -78,6 +78,23 @@ class HealthHttpTests(unittest.IsolatedAsyncioTestCase):
         await server.close()
         self.assertEqual(1, web.runner.cleanup_count)
 
+    async def test_registers_optional_media_proxy(self) -> None:
+        web = FakeWeb()
+
+        async def media_handler(request):  # type: ignore[no-untyped-def]
+            return request
+
+        server = AiohttpHealthServer(
+            HealthState(), "127.0.0.1", 8080, web, media_handler=media_handler
+        )
+        await server.start()
+
+        self.assertEqual(
+            ["/media/{token}/{filename}", "/live", "/ready"],
+            [path for path, _ in web.application.router.routes],
+        )
+        await server.close()
+
     async def test_readiness_changes_response_status(self) -> None:
         health = HealthState()
         web = FakeWeb()

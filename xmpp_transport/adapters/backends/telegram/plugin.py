@@ -3,6 +3,8 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
+import secrets
+from urllib.parse import quote
 from typing import Callable, Mapping, Optional, Protocol, Sequence
 from uuid import uuid4
 
@@ -25,6 +27,8 @@ from xmpp_transport.domain.models import (
     IncomingMessage,
     OutgoingMessage,
     Participant,
+    Media,
+    MediaKind,
     ReplyReference,
 )
 from xmpp_transport.ports.backend import (
@@ -67,6 +71,12 @@ class TelegramClient(Protocol):
         ...
 
     async def send_message(self, entity, body: str, reply_to=None):  # type: ignore[no-untyped-def]
+        ...
+
+    async def send_file(self, entity, file, **kwargs):  # type: ignore[no-untyped-def]
+        ...
+
+    async def download_media(self, message, file=bytes):  # type: ignore[no-untyped-def]
         ...
 
     def add_event_handler(self, handler, event_builder) -> None:  # type: ignore[no-untyped-def]
@@ -162,9 +172,11 @@ class TelegramBackendSession:
         session_data: str,
         event_sink: BackendEventSink,
         client_factory: TelegramClientFactory,
+        media_register: Callable[[TelegramClient, object, str, str], str],
     ) -> None:
         self._binding_id = binding_id
         self._event_sink = event_sink
+        self._media_register = media_register
         self._client = client_factory(session_data)
         self._started = False
         self._closed = False
@@ -231,13 +243,17 @@ class TelegramBackendSession:
             raise InvalidCommand("message belongs to another binding")
         peer_id = self._peer_id(message.conversation_id)
         entity = await self._resolve_entity(peer_id)
-        sent = await self._client.send_message(
-            entity,
-            message.text or "",
-            reply_to=(
-                int(message.reply_to.message_id) if message.reply_to is not None else None
-            ),
-        )
+        reply_to = int(message.reply_to.message_id) if message.reply_to is not None else None
+        if message.media:
+            sent = await self._send_media(entity, message, reply_to)
+        else:
+            sent = await self._client.send_message(
+                entity,
+                message.text or "",
+                reply_to=reply_to,
+            )
+        if isinstance(sent, list):
+            sent = sent[-1] if sent else None
         message_id = getattr(sent, "id", None)
         if message_id is None:
             raise BackendUnavailable("Telegram send result did not contain a message ID")
@@ -246,6 +262,104 @@ class TelegramBackendSession:
             if len(self._sent_group_messages) > 1024:
                 self._sent_group_messages.pop()
         return SendResult(RemoteObjectId(str(message_id)))
+
+    async def _send_media(
+        self, entity, message: OutgoingMessage, reply_to
+    ):  # type: ignore[no-untyped-def]
+        media = tuple(
+            item
+            for item in message.media
+            if (item.source_url or "").startswith(("http://", "https://"))
+        )
+        if not media:
+            return await self._client.send_message(
+                entity, message.text or "", reply_to=reply_to
+            )
+        files = [item.source_url for item in media]
+        voice_note = len(media) == 1 and media[0].voice
+        try:
+            return await self._client.send_file(
+                entity,
+                files if len(files) > 1 else files[0],
+                caption=message.text or None,
+                reply_to=reply_to,
+                voice_note=voice_note,
+            )
+        except Exception:
+            log.debug(
+                "Telegram URL upload failed; retrying downloaded media",
+                exc_info=True,
+            )
+            downloaded = []
+            try:
+                downloaded = await self._download_media_files(media)
+                return await self._client.send_file(
+                    entity,
+                    downloaded if len(downloaded) > 1 else downloaded[0],
+                    caption=message.text or None,
+                    reply_to=reply_to,
+                    voice_note=voice_note,
+                )
+            except Exception:
+                log.warning(
+                    "Telegram media upload failed; sending links", exc_info=True
+                )
+                fallback = "\n".join(
+                    item for item in ((message.text or "").strip(), *files) if item
+                )
+                return await self._client.send_message(
+                    entity, fallback, reply_to=reply_to
+                )
+            finally:
+                import os
+
+                for path in downloaded:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        log.debug("Could not remove Telegram upload file %s", path)
+
+
+
+    async def _download_media_files(self, media: Sequence[Media]):  # type: ignore[no-untyped-def]
+        import os
+        import tempfile
+        from urllib.parse import unquote, urlsplit
+
+        import aiohttp
+
+        downloaded = []
+        async with aiohttp.ClientSession() as session:
+            for item in media:
+                suffix = os.path.splitext(
+                    item.file_name or unquote(urlsplit(item.source_url or "").path)
+                )[1]
+                handle = tempfile.NamedTemporaryFile(
+                    prefix="xmpp-telegram-upload-", suffix=suffix, delete=False
+                )
+                path = handle.name
+                handle.close()
+                size = 0
+                try:
+                    async with session.get(item.source_url) as response:
+                        response.raise_for_status()
+                        length = response.headers.get("Content-Length")
+                        if length and int(length) > 50 * 1024 * 1024:
+                            raise ValueError("Telegram upload exceeds 50 MiB")
+                        with open(path, "wb") as output:
+                            async for chunk in response.content.iter_chunked(65536):
+                                size += len(chunk)
+                                if size > 50 * 1024 * 1024:
+                                    raise ValueError("Telegram upload exceeds 50 MiB")
+                                output.write(chunk)
+                except Exception:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+                    raise
+                downloaded.append(path)
+        return downloaded
 
     async def _synchronize_contacts(self) -> None:
         for contact in await self._list_contacts():
@@ -344,7 +458,8 @@ class TelegramBackendSession:
         if getattr(event, "out", False) and not is_group:
             return
         body = str(getattr(event, "raw_text", "") or "").strip()
-        if not body:
+        media = tuple(await self._incoming_media(event))
+        if not body and not media:
             return
         peer_id = getattr(event, "chat_id", None) or getattr(event, "sender_id", None)
         message_id = getattr(event, "id", None)
@@ -372,7 +487,8 @@ class TelegramBackendSession:
                     conversation_id=RemoteObjectId(str(peer_id)),
                     sender_id=RemoteObjectId(str(sender_id)),
                     occurred_at=self._event_date(event),
-                    text=body,
+                    text=body or None,
+                    media=media,
                     reply_to=(
                         ReplyReference(RemoteObjectId(str(reply_id)))
                         if reply_id is not None
@@ -382,6 +498,71 @@ class TelegramBackendSession:
                 ),
             )
         )
+
+
+    async def _incoming_media(self, event) -> Sequence[Media]:  # type: ignore[no-untyped-def]
+        message = getattr(event, "message", None)
+        media_value = getattr(message, "media", None) if message is not None else None
+        if media_value is None:
+            return ()
+        if media_value.__class__.__name__ == "MessageMediaWebPage":
+            return ()
+        file_info = getattr(message, "file", None)
+        mime_type = str(getattr(file_info, "mime_type", "") or "")
+        is_voice = bool(getattr(message, "voice", None))
+        is_sticker = bool(getattr(message, "sticker", None))
+        if not mime_type:
+            mime_type = (
+                "image/jpeg"
+                if getattr(message, "photo", None)
+                else "application/octet-stream"
+            )
+        kind = self._media_kind(mime_type, is_sticker)
+        file_name = str(getattr(file_info, "name", "") or "") or "telegram-{}{}".format(
+            getattr(event, "id", "media"), self._media_extension(mime_type)
+        )
+        source_url = self._media_register(
+            self._client, message, mime_type, file_name
+        )
+        return (
+            Media(
+                id=RemoteObjectId(
+                    "{}:{}".format(
+                        getattr(event, "chat_id", "chat"),
+                        getattr(event, "id", "media"),
+                    )
+                ),
+                kind=kind,
+                content_type=mime_type,
+                file_name=file_name,
+                size=getattr(file_info, "size", None),
+                source_url=source_url,
+                width=getattr(file_info, "width", None),
+                height=getattr(file_info, "height", None),
+                duration=getattr(file_info, "duration", None),
+                voice=is_voice,
+            ),
+        )
+
+    @staticmethod
+    def _media_kind(mime_type: str, sticker: bool = False) -> MediaKind:
+        if sticker:
+            return MediaKind.STICKER
+        major = mime_type.partition("/")[0].lower()
+        return {
+            "image": MediaKind.IMAGE,
+            "video": MediaKind.VIDEO,
+            "audio": MediaKind.AUDIO,
+        }.get(major, MediaKind.FILE)
+
+    @staticmethod
+    def _media_extension(mime_type: str) -> str:
+        return {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "video/mp4": ".mp4",
+            "audio/ogg": ".ogg",
+        }.get(mime_type.lower(), "")
 
     async def _update_group_from_event(
         self, event, peer_id: int, sender_id: int
@@ -500,6 +681,8 @@ class TelegramBackendPlugin:
         self._client_factory = client_factory
         self._api_id = 0
         self._api_hash = ""
+        self._media_base_url = "http://127.0.0.1:8080"
+        self._media_references = {}
 
     def configure(self, options: Mapping[str, str]) -> None:
         try:
@@ -512,6 +695,9 @@ class TelegramBackendPlugin:
         if not api_hash:
             raise ValueError("api_hash must not be empty")
         self._api_id = api_id
+        self._media_base_url = options.get("media_base_url", self._media_base_url).strip()
+        if not self._media_base_url.startswith(("http://", "https://")):
+            raise ValueError("media_base_url must use HTTP or HTTPS")
         self._api_hash = api_hash
 
     def _create_client(self, session_data: Optional[str]) -> TelegramClient:
@@ -552,4 +738,38 @@ class TelegramBackendPlugin:
             session_data,
             event_sink,
             self._create_client,
+            self._register_media,
+        )
+
+    def _register_media(
+        self, client: TelegramClient, message, mime_type: str, file_name: str
+    ) -> str:  # type: ignore[no-untyped-def]
+        token = secrets.token_urlsafe(24)
+        self._media_references[token] = (client, message, mime_type, file_name)
+        if len(self._media_references) > 4096:
+            self._media_references.pop(next(iter(self._media_references)))
+        return "{}/media/{}/{}".format(
+            self._media_base_url.rstrip("/"), token, quote(file_name)
+        )
+
+    async def media_handler(self, request):  # type: ignore[no-untyped-def]
+        from aiohttp import web
+
+        reference = self._media_references.get(request.match_info["token"])
+        if reference is None:
+            raise web.HTTPNotFound()
+        client, message, mime_type, file_name = reference
+        content = await client.download_media(message, file=bytes)
+        if not content:
+            raise web.HTTPNotFound()
+        safe_name = file_name.replace("\\", "_").replace('"', "_")
+        safe_name = safe_name.replace("\r", "_").replace("\n", "_")
+        return web.Response(
+            body=content,
+            headers={
+                "Content-Type": mime_type,
+                "Content-Disposition": 'inline; filename="{}"'.format(safe_name),
+                "Cache-Control": "private, max-age=300",
+                "Access-Control-Allow-Origin": "*",
+            },
         )
