@@ -278,8 +278,10 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(100, False)], self.client.downloaded_avatars)
 
     async def test_updates_group_avatar_from_service_event(self) -> None:
+        # The original transport creates a group only on its first message.
         await self.session.start()
         action = type("MessageActionChatEditPhoto", (), {})()
+        await self.client.handler(GroupEvent())
         event = GroupEvent()
         event.raw_text = ""
         event.message = type("Message", (), {"action": action})()
@@ -442,8 +444,12 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("image/jpeg", response.headers["Content-Type"])
 
     async def test_syncs_groups_and_sends_group_text(self) -> None:
+        # Dialog discovery must not create Xabber groups or send invitations.
         await self.session.start()
 
+        self.assertFalse(
+            any(isinstance(item, ConversationChanged) for item in self.sink.events)
+        )
         conversations = await self.session.features()[
             ConversationSource
         ].conversations()
@@ -474,6 +480,25 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
             [item for item in self.sink.events if isinstance(item, MessageReceived)]
         )
         self.assertEqual(before, after)
+
+    async def test_does_not_create_group_for_unsynced_avatar_event(self) -> None:
+        await self.session.start()
+        event = GroupEvent()
+        event.raw_text = ""
+        event.message = type(
+            "Message",
+            (),
+            {
+                "reply_to_msg_id": None,
+                "action": type("MessageActionChatEditPhoto", (), {})(),
+            },
+        )()
+
+        await self.client.handler(event)
+
+        self.assertFalse(
+            any(isinstance(item, ConversationChanged) for item in self.sink.events)
+        )
 
     async def test_publishes_incoming_group_message_and_sender(self) -> None:
         await self.session.start()

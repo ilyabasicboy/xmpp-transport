@@ -224,7 +224,6 @@ class TelegramBackendSession:
             self._install_message_handler()
             self._started = True
             await self._synchronize_contacts()
-            await self._synchronize_conversations()
         except Exception as exc:
             await self._publish_state(SessionState.FAILED, type(exc).__name__)
             raise BackendUnavailable("Telegram session failed to start") from exc
@@ -560,7 +559,7 @@ class TelegramBackendSession:
             return
         if is_group and self._is_avatar_update_event(event):
             peer_id = getattr(event, "chat_id", None)
-            if peer_id is not None:
+            if peer_id is not None and int(peer_id) in self._conversations:
                 sender_id = getattr(event, "sender_id", None) or self._owner_id or peer_id
                 await self._update_group_from_event(
                     event, int(peer_id), int(sender_id)

@@ -180,7 +180,15 @@ class SingleBackendRuntime:
             self._backend.component_domain,
             server_domain,
             roster_namespace,
-            (self._backend.options.get("roster_group", self._backend.name.upper()),),
+            (
+                self._backend.options.get(
+                    "roster_group",
+                    "Telegram"
+                    if self._backend.name == "telegram"
+                    else self._backend.name.upper(),
+                ),
+            ),
+            self._backend.options.get("iq_auth_secret", ""),
         )
         roster_sync = RosterSync(AsyncpgRosterSyncRepository(pool), roster)
         dispatcher.register(ContactChanged, roster_sync.handle)
