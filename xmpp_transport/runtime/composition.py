@@ -156,9 +156,11 @@ class SingleBackendRuntime:
         server_domain = self._backend.options.get(
             "server_domain", _server_domain(self._backend.component_domain)
         )
+        transport_namespace = "urn:xabber:transport:{}:1".format(
+            self._backend.name
+        )
         roster_namespace = self._backend.options.get(
-            "roster_namespace",
-            "urn:xabber:transport:{}:1".format(self._backend.name),
+            "roster_namespace", "urn:xabber:transport:roster:1"
         )
         delivery = XmppMessageDelivery(
             self._wire,
@@ -167,7 +169,7 @@ class SingleBackendRuntime:
             codec,
             server_domain=server_domain,
             control_jid="{}@{}".format(control_localpart, self._backend.component_domain),
-            transport_namespace=roster_namespace,
+            transport_namespace=transport_namespace,
             group_localpart_prefix="{}g".format(self._backend.name),
             member_fallback_prefix=self._backend.name,
         )
@@ -252,7 +254,7 @@ class SingleBackendRuntime:
             messages,
             codec,
             control=control,
-            transport_namespace=roster_namespace,
+            transport_namespace=transport_namespace,
             server_domain=server_domain,
             group_localpart_prefix="{}g".format(self._backend.name),
         )

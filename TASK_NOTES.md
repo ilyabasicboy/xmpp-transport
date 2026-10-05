@@ -459,6 +459,12 @@ the application layer.
 - Add component-domain allowlisting and generic roster operation payloads.
 - Verify Telegram and MAX against the same module build.
 
+Current progress: the provider-neutral `mod_transport` source and panel package
+are implemented in `/home/ilya.basyrov/Projects/module-transport`. The shared
+roster IQ namespace is `urn:xabber:transport:roster:1`; each allowlisted
+component is restricted to roster contacts in its own component domain. Live
+verification of both providers against one installed module build remains.
+
 ### Phase 7: Migration and hardening
 
 - Compare observable behavior with both existing transports.
