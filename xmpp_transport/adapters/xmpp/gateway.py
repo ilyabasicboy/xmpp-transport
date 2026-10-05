@@ -105,6 +105,8 @@ class XmppDirectMessageGateway:
                     )
                 )
                 return
+            if self._is_group_service_stanza(stanza):
+                return
             if self._control is not None and self._control.accepts(
                 stanza.attrib.get("to", "")
             ):
@@ -177,14 +179,20 @@ class XmppDirectMessageGateway:
             owner_jid = bytes.fromhex(owner_hex).decode("utf-8")
         except (ValueError, UnicodeDecodeError):
             return None
+        body = next(
+            ("".join(child.itertext()) for child in stanza if child.tag.rsplit("}", 1)[-1] == "body"),
+            "",
+        )
         groups = stanza.find("{{{}}}x".format(GROUPS_NS))
         user = (
             groups.find("{{{}}}user".format(GROUPS_NS))
             if groups is not None
             else None
         )
-        jid = user.find("jid") if user is not None else None
+        jid = self._child_by_local_name(user, "jid") if user is not None else None
         embedded_sender = (jid.text or "").strip().split("/", 1)[0] if jid is not None else ""
+        if not embedded_sender and body and not _looks_like_group_service_message(body):
+            embedded_sender = owner_jid
         if embedded_sender != owner_jid:
             return None
         route = await self._routes.resolve_group(
@@ -192,11 +200,35 @@ class XmppDirectMessageGateway:
         )
         if route is None:
             return None
+        return route, body
+
+    def _is_group_service_stanza(self, stanza: ET.Element) -> bool:
+        if not self._server_domain or not self._group_localpart_prefix:
+            return False
+        if self._control is None or not self._control.accepts(
+            stanza.attrib.get("to", "")
+        ):
+            return False
+        from_jid = stanza.attrib.get("from", "").split("/", 1)[0]
+        localpart, separator, domain = from_jid.partition("@")
+        if (
+            not separator
+            or domain != self._server_domain
+            or not localpart.startswith(self._group_localpart_prefix + "-")
+        ):
+            return False
         body = next(
             ("".join(child.itertext()) for child in stanza if child.tag.rsplit("}", 1)[-1] == "body"),
             "",
         )
-        return route, body
+        return not body or _looks_like_group_service_message(body)
+
+    @staticmethod
+    def _child_by_local_name(parent: ET.Element, local_name: str) -> Optional[ET.Element]:
+        for child in parent:
+            if child.tag.rsplit("}", 1)[-1] == local_name:
+                return child
+        return None
 
     async def deliver_message(self, message: IncomingMessage) -> None:
         delivery = XmppMessageDelivery(
@@ -341,6 +373,19 @@ def _strip_group_author_prefix(body: str) -> str:
         return body
     _author, text = body.split(":\n", 1)
     return text
+
+
+def _looks_like_group_service_message(body: str) -> bool:
+    normalized = " ".join(body.lower().split())
+    return any(
+        fragment in normalized
+        for fragment in (
+            " joined the group",
+            " left the group",
+            " was invited to the group",
+            " was removed from the group",
+        )
+    )
 
 
 def _data_form_fields(stanza: ET.Element) -> Optional[dict]:
