@@ -1,8 +1,11 @@
 """Telethon-backed Telegram adapter preserving the original transport behavior."""
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import logging
-import secrets
 from collections.abc import Awaitable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Callable, Optional, Protocol
@@ -91,6 +94,9 @@ class TelegramClient(Protocol):
     async def download_media(self, message, file=bytes):  # type: ignore[no-untyped-def]
         ...
 
+    async def get_messages(self, entity, ids):  # type: ignore[no-untyped-def]
+        ...
+
     def add_event_handler(self, handler, event_builder) -> None:  # type: ignore[no-untyped-def]
         ...
 
@@ -99,6 +105,24 @@ TelegramClientFactory = Callable[[Optional[str]], TelegramClient]
 TelegramAvatarStore = Callable[
     [TelegramClient, object, int, str], Awaitable[Optional[Avatar]]
 ]
+
+
+async def _resolve_telegram_entity(
+    client: TelegramClient, peer_id: int
+):  # type: ignore[no-untyped-def]
+    from telethon.tl.functions.contacts import GetContactsRequest
+
+    if peer_id >= 0:
+        result = await client(GetContactsRequest(hash=0))
+        for user in getattr(result, "users", ()):
+            if int(user.id) == peer_id:
+                return user
+    async for dialog in client.iter_dialogs():
+        if int(dialog.id) == peer_id:
+            return dialog.entity
+    raise BackendUnavailable(
+        "Telegram chat is not available. Send /sync-contacts and try again."
+    )
 
 
 class TelegramAuthenticationFlow:
@@ -187,13 +211,17 @@ class TelegramBackendSession:
         session_data: str,
         event_sink: BackendEventSink,
         client_factory: TelegramClientFactory,
-        media_register: Callable[[TelegramClient, object, str, str], str],
+        media_register: Callable[[BindingId, int, int, str, str], str],
         avatar_store: TelegramAvatarStore,
+        session_started: Callable[[BindingId, TelegramClient], None],
+        session_stopped: Callable[[BindingId, TelegramClient], None],
     ) -> None:
         self._binding_id = binding_id
         self._event_sink = event_sink
         self._media_register = media_register
         self._avatar_store = avatar_store
+        self._session_started = session_started
+        self._session_stopped = session_stopped
         self._client = client_factory(session_data)
         self._started = False
         self._closed = False
@@ -228,6 +256,7 @@ class TelegramBackendSession:
             self._install_message_handler()
             self._started = True
             await self._synchronize_contacts()
+            self._session_started(self._binding_id, self._client)
         except Exception as exc:
             await self._publish_state(SessionState.FAILED, type(exc).__name__)
             raise BackendUnavailable("Telegram session failed to start") from exc
@@ -238,6 +267,7 @@ class TelegramBackendSession:
             return
         self._closed = True
         self._started = False
+        self._session_stopped(self._binding_id, self._client)
         await self._client.disconnect()
         await self._publish_state(SessionState.STOPPED)
 
@@ -530,18 +560,7 @@ class TelegramBackendSession:
         return tuple(sorted(contacts.values(), key=lambda item: item.display_name.casefold()))
 
     async def _resolve_entity(self, peer_id: int):  # type: ignore[no-untyped-def]
-        from telethon.tl.functions.contacts import GetContactsRequest
-
-        result = await self._client(GetContactsRequest(hash=0))
-        for user in getattr(result, "users", ()):
-            if int(user.id) == peer_id:
-                return user
-        async for dialog in self._client.iter_dialogs():
-            if int(dialog.id) == peer_id:
-                return dialog.entity
-        raise BackendUnavailable(
-            "Telegram chat is not available. Send /sync-contacts and try again."
-        )
+        return await _resolve_telegram_entity(self._client, peer_id)
 
     def _install_message_handler(self) -> None:
         from telethon import events
@@ -713,7 +732,11 @@ class TelegramBackendSession:
             getattr(event, "id", "media"), self._media_extension(mime_type)
         )
         source_url = self._media_register(
-            self._client, message, mime_type, file_name
+            self._binding_id,
+            int(getattr(event, "chat_id")),
+            int(getattr(event, "id")),
+            mime_type,
+            file_name,
         )
         return (
             Media(
@@ -886,7 +909,8 @@ class TelegramBackendPlugin:
         self._api_id = 0
         self._api_hash = ""
         self._media_base_url = "http://127.0.0.1:8080"
-        self._media_references = {}
+        self._media_url_secret = b""
+        self._active_clients: dict[BindingId, TelegramClient] = {}
         self._avatar_cache = TelegramAvatarCache(
             "data/avatars/telegram", self._media_base_url, 524288
         )
@@ -901,6 +925,9 @@ class TelegramBackendPlugin:
             raise ValueError("api_id must be positive")
         if not api_hash:
             raise ValueError("api_hash must not be empty")
+        media_url_secret = options.get("media_url_secret", "").strip()
+        if len(media_url_secret) < 32:
+            raise ValueError("media_url_secret must contain at least 32 characters")
         self._api_id = api_id
         self._media_base_url = options.get("media_base_url", self._media_base_url).strip()
         if not self._media_base_url.startswith(("http://", "https://")):
@@ -923,6 +950,7 @@ class TelegramBackendPlugin:
             avatar_storage_dir, avatar_base_url, avatar_max_bytes
         )
         self._api_hash = api_hash
+        self._media_url_secret = media_url_secret.encode("utf-8")
 
     def _create_client(self, session_data: Optional[str]) -> TelegramClient:
         if self._client_factory is not None:
@@ -964,20 +992,48 @@ class TelegramBackendPlugin:
             self._create_client,
             self._register_media,
             self._store_avatar,
+            self._session_started,
+            self._session_stopped,
         )
 
     def _register_media(
-        self, client: TelegramClient, message, mime_type: str, file_name: str
-    ) -> str:  # type: ignore[no-untyped-def]
-        token = secrets.token_urlsafe(24)
-        self._media_references[token] = (
-            "media", client, message, mime_type, file_name
+        self,
+        binding_id: BindingId,
+        peer_id: int,
+        message_id: int,
+        mime_type: str,
+        file_name: str,
+    ) -> str:
+        payload = self._encode_url_part(
+            json.dumps(
+                {
+                    "binding_id": str(binding_id),
+                    "peer_id": peer_id,
+                    "message_id": message_id,
+                    "mime_type": mime_type,
+                    "file_name": file_name,
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
         )
-        if len(self._media_references) > 4096:
-            self._media_references.pop(next(iter(self._media_references)))
+        signature = self._encode_url_part(
+            hmac.new(
+                self._media_url_secret,
+                payload.encode("ascii"),
+                hashlib.sha256,
+            ).digest()
+        )
+        token = "{}.{}".format(payload, signature)
         return "{}/media/{}/{}".format(
             self._media_base_url.rstrip("/"), token, quote(file_name)
         )
+
+    def _session_started(self, binding_id: BindingId, client: TelegramClient) -> None:
+        self._active_clients[binding_id] = client
+
+    def _session_stopped(self, binding_id: BindingId, client: TelegramClient) -> None:
+        if self._active_clients.get(binding_id) is client:
+            self._active_clients.pop(binding_id, None)
 
     async def _store_avatar(
         self,
@@ -1014,11 +1070,27 @@ class TelegramBackendPlugin:
     async def media_handler(self, request):  # type: ignore[no-untyped-def]
         from aiohttp import web
 
-        reference = self._media_references.get(request.match_info["token"])
-        if reference is None:
+        try:
+            value = self._decode_media_token(request.match_info["token"])
+            binding_id = BindingId(str(value["binding_id"]))
+            peer_id = int(value["peer_id"])
+            message_id = int(value["message_id"])
+            mime_type = str(value["mime_type"])
+            file_name = str(value["file_name"])
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
             raise web.HTTPNotFound()
-        _kind, client, value, mime_type, file_name = reference
-        content = await client.download_media(value, file=bytes)
+        client = self._active_clients.get(binding_id)
+        if client is None:
+            raise web.HTTPNotFound()
+        try:
+            entity = await _resolve_telegram_entity(client, peer_id)
+            message = await client.get_messages(entity, ids=message_id)
+        except BackendUnavailable:
+            raise web.HTTPNotFound()
+        media = getattr(message, "media", None) if message is not None else None
+        if media is None:
+            raise web.HTTPNotFound()
+        content = await client.download_media(media, file=bytes)
         safe_name = file_name.replace("\\", "_").replace('"', "_")
         safe_name = safe_name.replace("\r", "_").replace("\n", "_")
         if not content:
@@ -1032,3 +1104,30 @@ class TelegramBackendPlugin:
                 "Access-Control-Allow-Origin": "*",
             },
         )
+
+    def _decode_media_token(self, token: str) -> Mapping[str, object]:
+        payload, separator, supplied_signature = token.rpartition(".")
+        if not separator or not payload or not supplied_signature:
+            raise ValueError("invalid media token")
+        expected_signature = self._encode_url_part(
+            hmac.new(
+                self._media_url_secret,
+                payload.encode("ascii"),
+                hashlib.sha256,
+            ).digest()
+        )
+        if not hmac.compare_digest(supplied_signature, expected_signature):
+            raise ValueError("invalid media signature")
+        value = json.loads(self._decode_url_part(payload).decode("utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("invalid media payload")
+        return value
+
+    @staticmethod
+    def _encode_url_part(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+    @staticmethod
+    def _decode_url_part(value: str) -> bytes:
+        padding = "=" * (-len(value) % 4)
+        return base64.b64decode(value + padding, altchars=b"-_", validate=True)

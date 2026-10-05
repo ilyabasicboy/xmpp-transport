@@ -146,6 +146,10 @@ class FakeClient:
     async def download_media(self, message, file=bytes):  # type: ignore[no-untyped-def]
         return self.downloaded_media
 
+    async def get_messages(self, entity, ids):  # type: ignore[no-untyped-def]
+        self.resolved_media = (entity.id, ids)
+        return type("StoredMessage", (), {"id": ids, "media": object()})()
+
     def add_event_handler(self, handler, event_builder):  # type: ignore[no-untyped-def]
         self.handler = handler
 
@@ -221,6 +225,7 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
             {
                 "api_id": "123456",
                 "api_hash": "test-api-hash",
+                "media_url_secret": "test-media-url-secret-at-least-32-chars",
                 "media_base_url": "http://127.0.0.1:8080",
                 "avatar_base_url": "http://127.0.0.1:8080",
                 "avatar_storage_dir": self.avatar_directory.name,
@@ -507,6 +512,91 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(b"telegram-media", response.body)
         self.assertEqual("image/jpeg", response.headers["Content-Type"])
 
+    async def test_resolves_signed_media_url_after_plugin_restart(self) -> None:
+        await self.session.start()
+        file_info = type(
+            "File",
+            (),
+            {
+                "mime_type": "image/jpeg",
+                "name": "persisted.jpg",
+                "width": 640,
+                "height": 480,
+                "duration": None,
+                "size": 14,
+            },
+        )()
+        message = type(
+            "Message",
+            (),
+            {
+                "reply_to_msg_id": None,
+                "media": object(),
+                "file": file_info,
+                "photo": object(),
+                "voice": None,
+                "sticker": None,
+            },
+        )()
+        event = type(
+            "Event",
+            (),
+            {
+                "out": False,
+                "is_private": True,
+                "raw_text": "",
+                "chat_id": 100,
+                "sender_id": 100,
+                "id": 59,
+                "date": datetime.now(timezone.utc),
+                "message": message,
+            },
+        )()
+
+        await self.client.handler(event)
+        received = [item for item in self.sink.events if isinstance(item, MessageReceived)]
+        token = received[-1].message.media[0].source_url.split("/media/", 1)[1].split("/", 1)[0]
+        restored_client = FakeClient("stored-session")
+        restored_plugin = TelegramBackendPlugin(lambda session: restored_client)
+        restored_plugin.configure(
+            {
+                "api_id": "123456",
+                "api_hash": "test-api-hash",
+                "media_url_secret": "test-media-url-secret-at-least-32-chars",
+                "media_base_url": "http://127.0.0.1:8080",
+                "avatar_storage_dir": self.avatar_directory.name,
+            }
+        )
+        restored_session = restored_plugin.create_session(
+            BindingId("binding-1"), b"stored-session", Sink()  # type: ignore[arg-type]
+        )
+        await restored_session.start()
+        request = type("Request", (), {"match_info": {"token": token}})()
+
+        response = await restored_plugin.media_handler(request)
+
+        self.assertEqual(b"telegram-media", response.body)
+        self.assertEqual((100, 59), restored_client.resolved_media)
+        await restored_session.close()
+
+    async def test_rejects_modified_media_url(self) -> None:
+        await self.session.start()
+        token = self.plugin._register_media(
+            BindingId("binding-1"), 100, 59, "image/jpeg", "photo.jpg"
+        )
+        signed_token = token.split("/media/", 1)[1].split("/", 1)[0]
+        replacement = "A" if signed_token[-1] != "A" else "B"
+        request = type(
+            "Request",
+            (),
+            {"match_info": {"token": signed_token[:-1] + replacement}},
+        )()
+
+        from aiohttp import web
+
+        with self.assertRaises(web.HTTPNotFound):
+            await self.plugin.media_handler(request)
+
     async def test_syncs_groups_and_sends_group_text(self) -> None:
         # Dialog discovery must not create Xabber groups or send invitations.
         await self.session.start()
@@ -625,7 +715,15 @@ class TelegramPluginTests(unittest.TestCase):
             plugin.configure({"api_id": "0", "api_hash": "hash"})
         with self.assertRaisesRegex(ValueError, "api_hash"):
             plugin.configure({"api_id": "123", "api_hash": ""})
-        plugin.configure({"api_id": "123", "api_hash": "hash"})
+        with self.assertRaisesRegex(ValueError, "media_url_secret"):
+            plugin.configure({"api_id": "123", "api_hash": "hash"})
+        plugin.configure(
+            {
+                "api_id": "123",
+                "api_hash": "hash",
+                "media_url_secret": "test-media-url-secret-at-least-32-chars",
+            }
+        )
 
 
 if __name__ == "__main__":
