@@ -46,7 +46,7 @@ from xmpp_transport.domain.events import (
     SessionStateChanged,
 )
 from xmpp_transport.domain.identifiers import BackendId
-from xmpp_transport.ports.backend import BackendPlugin
+from xmpp_transport.ports.backend import BackendPlugin, ContactAdder
 from xmpp_transport.ports.events import BackendEventSink
 from xmpp_transport.ports.xmpp import XmppRoster
 
@@ -241,6 +241,8 @@ class SingleBackendRuntime:
                 "contacts_page_size",
             ),
             provider_name=self._backend.name.upper(),
+            supports_phone_contact_addition=ContactAdder
+            in getattr(self._plugin, "supported_features", ()),
         )
         gateway = XmppDirectMessageGateway(
             self._wire,

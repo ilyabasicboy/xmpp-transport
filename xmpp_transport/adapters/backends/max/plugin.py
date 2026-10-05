@@ -639,6 +639,9 @@ class MaxBackendSession:
 
 class MaxBackendPlugin:
     backend_id = BackendId("max")
+    supported_features = frozenset(
+        (MessageSender, ContactSource, ContactAdder, ButtonActions)
+    )
 
     def __init__(
         self,

@@ -938,6 +938,7 @@ class TelegramBackendSession:
 
 class TelegramBackendPlugin:
     backend_id = BackendId("telegram")
+    supported_features = frozenset((MessageSender, ContactSource, ConversationSource))
 
     def __init__(self, client_factory: Optional[TelegramClientFactory] = None) -> None:
         self._client_factory = client_factory

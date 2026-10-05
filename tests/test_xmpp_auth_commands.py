@@ -139,14 +139,29 @@ class XmppAuthenticationCommandTests(unittest.IsolatedAsyncioTestCase):
             "max.example.com",
             Bindings(),  # type: ignore[arg-type]
             Authentication(),  # type: ignore[arg-type]
+            supports_phone_contact_addition=True,
         )
 
         response = await commands.handle("user@example.com", "/help")
 
         for command in ("/login", "/password", "/status", "/contacts", "/add", "/logout"):
             self.assertIn(command, response.body)
+        self.assertIn("/add phone", response.body)
         self.assertEqual("/login", response.buttons[0][0].data)
         self.assertEqual("/help", response.buttons[-1][-1].data)
+
+    async def test_help_hides_phone_add_when_backend_does_not_support_it(self) -> None:
+        commands = XmppAuthenticationCommands(
+            BackendId("telegram"),
+            "telegram.example.com",
+            Bindings(),  # type: ignore[arg-type]
+            Authentication(),  # type: ignore[arg-type]
+            provider_name="TELEGRAM",
+        )
+
+        response = await commands.handle("user@example.com", "/help")
+
+        self.assertNotIn("/add phone", response.body)
 
     async def test_password_command_returns_private_data_form(self) -> None:
         commands = XmppAuthenticationCommands(

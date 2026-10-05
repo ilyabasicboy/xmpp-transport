@@ -69,6 +69,7 @@ class XmppAuthenticationCommands:
         roster: Optional[XmppRoster] = None,
         contacts_page_size: int = 20,
         provider_name: Optional[str] = None,
+        supports_phone_contact_addition: bool = False,
     ) -> None:
         self._backend_id = backend_id
         self._provider_name = provider_name or str(backend_id).upper()
@@ -84,6 +85,7 @@ class XmppAuthenticationCommands:
         self._sessions = sessions
         self._roster = roster
         self._contacts_page_size = contacts_page_size
+        self._supports_phone_contact_addition = supports_phone_contact_addition
 
     def accepts(self, to_jid: str) -> bool:
         return to_jid.split("/", 1)[0].strip().lower() == self._control_jid
@@ -205,7 +207,8 @@ class XmppAuthenticationCommands:
         lines.extend(("", "Добавить в Xabber: /add <номер>"))
         if page < total:
             lines.append("Следующая страница: /contacts {}".format(page + 1))
-        lines.append("Добавить по телефону: /add phone +79990000000")
+        if self._supports_phone_contact_addition:
+            lines.append("Добавить по телефону: /add phone +79990000000")
         rows = []
         navigation = []
         if page > 1:
@@ -226,6 +229,8 @@ class XmppAuthenticationCommands:
         if binding is None or source is None or self._roster is None:
             return "MAX не подключен. Отправьте /login для авторизации."
         if argument.lower().startswith("phone "):
+            if not self._supports_phone_contact_addition:
+                return "Добавление контакта по телефону недоступно."
             adder = await self._sessions.feature(binding.binding_id, ContactAdder)  # type: ignore[union-attr]
             if adder is None:
                 return "Добавление контакта по телефону недоступно."
@@ -237,7 +242,9 @@ class XmppAuthenticationCommands:
             try:
                 selection = int(argument)
             except ValueError:
-                return "Используйте: /add <номер> или /add phone +79990000000"
+                if self._supports_phone_contact_addition:
+                    return "Используйте: /add <номер> или /add phone +79990000000"
+                return "Используйте: /add <номер>"
             contacts = tuple(await source.contacts())
             if selection < 1 or selection > len(contacts):
                 return "Контакт с таким номером отсутствует в списке."
@@ -268,20 +275,25 @@ class XmppAuthenticationCommands:
         await self._bindings.disable_binding(binding.binding_id)
         return "MAX отключен, сохраненная сессия удалена."
 
-    @staticmethod
-    def help_text() -> str:
-        return (
+    def help_text(self) -> str:
+        lines = [
             "Команды MAX transport:\n"
             "/login - подключить MAX-аккаунт через QR\n"
             "/password <пароль> - продолжить login при включенной 2FA\n"
             "/status - проверить состояние подключения\n"
             "/contacts [страница] - показать контакты MAX\n"
             "/sync-contacts - повторно синхронизировать контакты\n"
-            "/add <номер> - добавить выбранный контакт в Xabber\n"
-            "/add phone +79990000000 - добавить контакт MAX по телефону\n"
-            "/logout - отключить MAX и удалить сохраненную сессию\n"
-            "/help - показать команды"
+            "/add <номер> - добавить выбранный контакт в Xabber"
+        ]
+        if self._supports_phone_contact_addition:
+            lines.append("/add phone +79990000000 - добавить контакт MAX по телефону")
+        lines.extend(
+            (
+                "/logout - отключить MAX и удалить сохраненную сессию",
+                "/help - показать команды",
+            )
         )
+        return "\n".join(lines)
 
     def _response(self, body: str) -> ControlResponse:
         return ControlResponse(
