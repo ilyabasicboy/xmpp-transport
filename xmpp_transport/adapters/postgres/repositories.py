@@ -208,6 +208,19 @@ class AsyncpgBindingRepository:
         if status != "UPDATE 1":
             raise LookupError("binding not found for logout: {}".format(binding_id))
 
+    async def mark_authorization_lost(self, binding_id: BindingId) -> None:
+        status = await self._pool.execute(
+            """
+            UPDATE backend_bindings
+            SET status = 'authorization_lost',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE binding_id = $1 AND status = 'active'
+            """,
+            str(binding_id),
+        )
+        if status not in ("UPDATE 0", "UPDATE 1"):
+            raise RuntimeError("unexpected authorization status update: {}".format(status))
+
 
 class AsyncpgMessageMappingRepository:
     def __init__(self, pool: DatabasePool) -> None:

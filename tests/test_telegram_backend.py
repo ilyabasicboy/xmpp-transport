@@ -9,12 +9,14 @@ from xmpp_transport.adapters.backends.telegram import (
 )
 from xmpp_transport.domain.auth import AuthResponse, AuthResponseKind, AuthState
 from xmpp_transport.domain.events import (
+    AuthorizationLost,
     ContactChanged,
     ConversationChanged,
     MessageReceived,
     SessionState,
     SessionStateChanged,
 )
+from xmpp_transport.domain.errors import AuthorizationRequired
 from xmpp_transport.domain.identifiers import BackendId, BindingId, RemoteObjectId
 from xmpp_transport.domain.models import (
     ConversationKind,
@@ -425,6 +427,26 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual((200, "reply", 44), self.client.sent[-1])
+
+    async def test_publishes_authorization_loss_once_before_send(self) -> None:
+        await self.session.start()
+        self.client.authorized = False
+        sender = self.session.features()[MessageSender]
+        message = OutgoingMessage(
+            "client-expired",
+            BindingId("binding-1"),
+            RemoteObjectId("200"),
+            text="not sent",
+        )
+
+        with self.assertRaises(AuthorizationRequired):
+            await sender.send_message(message)
+        with self.assertRaises(AuthorizationRequired):
+            await sender.send_message(message)
+
+        lost = [item for item in self.sink.events if isinstance(item, AuthorizationLost)]
+        self.assertEqual(1, len(lost))
+        self.assertEqual([], self.client.sent)
 
     async def test_sends_native_forward_and_outer_comment(self) -> None:
         await self.session.start()

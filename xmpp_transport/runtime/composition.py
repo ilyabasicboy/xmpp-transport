@@ -1,5 +1,7 @@
 """Composition root for one fault-isolated backend process."""
 
+import asyncio
+import logging
 import os
 
 from typing import Mapping, Optional
@@ -52,6 +54,9 @@ from .config import BackendConfig, RuntimeConfig
 from .health import HealthState
 from .lifecycle import ApplicationRuntime
 from .registry import BackendRegistry
+
+
+log = logging.getLogger(__name__)
 
 
 class EventSinkRelay:
@@ -170,7 +175,10 @@ class SingleBackendRuntime:
         routes = DirectRouteResolver(self._plugin.backend_id, addresses, bindings)
         dispatcher = BackendEventDispatcher()
         dispatcher.register(MessageReceived, messages.receive)
-        dispatcher.register(AuthorizationLost, self._authorization_lost_handler(sessions))
+        dispatcher.register(
+            AuthorizationLost,
+            self._authorization_lost_handler(sessions, bindings),
+        )
         dispatcher.register(SessionStateChanged, self._observe_session_state)
         dispatcher.register(MessageChanged, self._unsupported_event)
         roster = self._roster or XmppServerRoster(
@@ -258,11 +266,26 @@ class SingleBackendRuntime:
         return application, authentication
 
     @staticmethod
-    def _authorization_lost_handler(sessions: SessionSupervisor):  # type: ignore[no-untyped-def]
+    def _authorization_lost_handler(
+        sessions: SessionSupervisor, bindings: AsyncpgBindingRepository
+    ):  # type: ignore[no-untyped-def]
         async def handle(event: AuthorizationLost) -> None:
-            await sessions.stop(event.envelope.binding_id)
+            await bindings.mark_authorization_lost(event.envelope.binding_id)
+            # start() can still own this binding lock when authorization is
+            # rejected. Deferred stop avoids deadlocking event publication.
+            task = asyncio.create_task(sessions.stop(event.envelope.binding_id))
+            task.add_done_callback(SingleBackendRuntime._log_background_failure)
 
         return handle
+
+    @staticmethod
+    def _log_background_failure(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception("Stopping unauthorized backend session failed")
 
     @staticmethod
     async def _observe_session_state(event: SessionStateChanged) -> None:

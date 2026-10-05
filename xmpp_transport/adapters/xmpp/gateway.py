@@ -105,6 +105,8 @@ class XmppDirectMessageGateway:
                     )
                 )
                 return
+            if self._is_group_fanout_stanza(stanza):
+                return
             if self._is_group_service_stanza(stanza):
                 return
             if self._control is not None and self._control.accepts(
@@ -222,6 +224,21 @@ class XmppDirectMessageGateway:
             "",
         )
         return not body or _looks_like_group_service_message(body)
+
+    def _is_group_fanout_stanza(self, stanza: ET.Element) -> bool:
+        if not self._server_domain or not self._group_localpart_prefix:
+            return False
+        if self._control is None or not self._control.accepts(
+            stanza.attrib.get("to", "")
+        ):
+            return False
+        from_jid = stanza.attrib.get("from", "").split("/", 1)[0]
+        localpart, separator, domain = from_jid.partition("@")
+        return (
+            bool(separator)
+            and domain == self._server_domain
+            and localpart.startswith(self._group_localpart_prefix + "-")
+        )
 
     @staticmethod
     def _child_by_local_name(parent: ET.Element, local_name: str) -> Optional[ET.Element]:

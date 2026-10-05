@@ -278,6 +278,38 @@ class XmppGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Message without sender marker", self.router.outgoing[0].text)
         self.assertEqual([], self.wire.sent)
 
+    async def test_ignores_reflected_group_message_from_provider_member(self) -> None:
+        control = FakeControl()
+        gateway = XmppDirectMessageGateway(
+            self.wire,
+            DirectRouteResolver(BackendId("telegram"), self.addresses, self.bindings),
+            self.addresses,
+            self.bindings,
+            self.router,  # type: ignore[arg-type]
+            XmppMessageCodec(),
+            control=control,  # type: ignore[arg-type]
+            transport_namespace="urn:xabber:transport:telegram:1",
+            server_domain="example.com",
+            group_localpart_prefix="telegramg",
+        )
+        stanza = ET.fromstring(
+            """
+            <message from='telegramg-75736572406578616d706c652e636f6d-888@example.com'
+                     to='bot@telegram.example.com' type='chat' id='provider-member-1'>
+              <body>Incoming from Telegram member</body>
+              <x xmlns='https://xabber.com/protocol/groups'>
+                <user><jid xmlns=''>chat-99@telegram.example.com</jid></user>
+              </x>
+            </message>
+            """
+        )
+
+        await gateway.handle_stanza(stanza)
+
+        self.assertEqual([], control.commands)
+        self.assertEqual([], self.router.outgoing)
+        self.assertEqual([], self.wire.sent)
+
     async def test_group_media_url_is_not_reintroduced_as_caption(self) -> None:
         control = FakeControl()
         gateway = XmppDirectMessageGateway(

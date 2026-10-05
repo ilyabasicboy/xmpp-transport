@@ -243,6 +243,7 @@ class TelegramBackendSession:
         self._conversations = {}
         self._sent_group_messages = set()
         self._listener_started_at: Optional[datetime] = None
+        self._authorization_lost_published = False
 
     @property
     def binding_id(self) -> BindingId:
@@ -257,14 +258,7 @@ class TelegramBackendSession:
         try:
             self._listener_started_at = datetime.now(timezone.utc)
             await self._client.connect()
-            if not await self._client.is_user_authorized():
-                await self._event_sink.publish(
-                    AuthorizationLost(
-                        envelope=self._envelope(AuthorizationLost.EVENT_TYPE),
-                        reason="Telegram session expired",
-                    )
-                )
-                raise AuthorizationRequired("Telegram session expired")
+            await self._ensure_authorized()
             owner = await self._client.get_me()
             self._owner_id = int(owner.id)
             self._install_message_handler()
@@ -303,6 +297,7 @@ class TelegramBackendSession:
             raise BackendUnavailable("Telegram backend session is not active")
         if message.binding_id != self._binding_id:
             raise InvalidCommand("message belongs to another binding")
+        await self._ensure_authorized()
         peer_id = self._peer_id(message.conversation_id)
         entity = await self._resolve_entity(peer_id)
         reply_to = int(str(message.reply_to.message_id)) if message.reply_to is not None else None
@@ -601,6 +596,7 @@ class TelegramBackendSession:
     async def _receive_message(self, event) -> None:  # type: ignore[no-untyped-def]
         if self._is_stale_event(event):
             return
+        await self._ensure_authorized()
         is_group = self._is_group_event(event)
         if getattr(event, "out", False) and not is_group:
             return
@@ -665,6 +661,19 @@ class TelegramBackendSession:
                 ),
             )
         )
+
+    async def _ensure_authorized(self) -> None:
+        if await self._client.is_user_authorized():
+            return
+        if not self._authorization_lost_published:
+            self._authorization_lost_published = True
+            await self._event_sink.publish(
+                AuthorizationLost(
+                    envelope=self._envelope(AuthorizationLost.EVENT_TYPE),
+                    reason="Telegram session expired",
+                )
+            )
+        raise AuthorizationRequired("Telegram session expired")
 
     def _is_stale_event(self, event) -> bool:  # type: ignore[no-untyped-def]
         if self._listener_started_at is None:

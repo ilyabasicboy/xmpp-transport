@@ -93,6 +93,15 @@ class BindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("status = 'active'", pool.calls[0][0])
 
+    async def test_marks_active_binding_authorization_lost(self) -> None:
+        pool = FakePool()
+        repository = AsyncpgBindingRepository(pool)
+
+        await repository.mark_authorization_lost(BindingId("binding-1"))
+
+        self.assertIn("status = 'authorization_lost'", pool.calls[0][0])
+        self.assertEqual(("binding-1",), pool.calls[0][1])
+
     async def test_resolves_active_binding_by_owner_and_backend(self) -> None:
         pool = FakePool()
         pool.row = {"binding_id": "binding-1", "backend_id": "telegram"}
