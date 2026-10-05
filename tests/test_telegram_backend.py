@@ -510,12 +510,30 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(RemoteObjectId("-300"), message.conversation_id)
         self.assertEqual(RemoteObjectId("300"), message.sender_id)
         self.assertEqual("true", message.attributes["is_group"])
+        self.assertEqual("false", message.attributes["is_self"])
+        self.assertEqual("100", message.attributes["owner_remote_id"])
         conversations = [
             item.conversation
             for item in self.sink.events
             if isinstance(item, ConversationChanged)
         ]
         self.assertEqual("Bob", conversations[-1].participants[0].display_name)
+
+    async def test_publishes_telegram_group_self_message_as_self(self) -> None:
+        await self.session.start()
+        event = GroupEvent()
+        event.out = True
+        event.sender_id = 100
+        event.id = 57
+
+        await self.client.handler(event)
+
+        received = [item for item in self.sink.events if isinstance(item, MessageReceived)]
+        message = received[-1].message
+        self.assertEqual(RemoteObjectId("100"), message.sender_id)
+        self.assertEqual("true", message.attributes["is_group"])
+        self.assertEqual("true", message.attributes["is_self"])
+        self.assertEqual("100", message.attributes["owner_remote_id"])
 
     async def test_lifecycle_is_idempotent(self) -> None:
         await self.session.start()

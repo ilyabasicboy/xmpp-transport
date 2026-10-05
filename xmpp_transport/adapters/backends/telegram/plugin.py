@@ -587,6 +587,16 @@ class TelegramBackendSession:
         if is_group:
             await self._update_group_from_event(event, int(peer_id), int(sender_id))
         reply_id = getattr(getattr(event, "message", None), "reply_to_msg_id", None)
+        attributes = {}
+        if is_group:
+            attributes = {
+                "is_group": "true",
+                "is_self": (
+                    "true" if getattr(event, "out", False) else "false"
+                ),
+            }
+            if self._owner_id is not None:
+                attributes["owner_remote_id"] = str(self._owner_id)
         await self._event_sink.publish(
             MessageReceived(
                 envelope=self._envelope(MessageReceived.EVENT_TYPE),
@@ -604,7 +614,7 @@ class TelegramBackendSession:
                         if reply_id is not None
                         else None
                     ),
-                    attributes={"is_group": "true"} if is_group else {},
+                    attributes=attributes,
                 ),
             )
         )

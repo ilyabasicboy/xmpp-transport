@@ -2,17 +2,11 @@
 
 import asyncio
 import inspect
-import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from xml.etree import ElementTree as ET
 
 from .gateway import MessageHandler
-
-
-log = logging.getLogger(__name__)
-STANZAS_NS = "urn:ietf:params:xml:ns:xmpp-stanzas"
-
 
 @dataclass(frozen=True)
 class ComponentSettings:
@@ -132,44 +126,8 @@ class SlixmppComponentWire:
         )
         if element.attrib.get("id"):
             iq["id"] = element.attrib["id"]
-        try:
-            response = await iq.send(timeout=timeout)
-        except Exception as exc:
-            if type(exc).__name__ == "IqError":
-                self._log_iq_error(exc, children[0])
-            raise
+        response = await iq.send(timeout=timeout)
         return response.xml
-
-    @staticmethod
-    def _log_iq_error(exc: Exception, payload: ET.Element) -> None:
-        stanza = getattr(exc, "iq", None)
-        xml = getattr(stanza, "xml", None)
-        error = None if xml is None else xml.find("{jabber:client}error")
-        if error is None and xml is not None:
-            error = xml.find("error")
-        code = error.attrib.get("code") if error is not None else None
-        error_type = error.attrib.get("type") if error is not None else None
-        condition = None
-        server_text = None
-        if error is not None:
-            text_element = error.find("{{{}}}text".format(STANZAS_NS))
-            server_text = text_element.text if text_element is not None else None
-            for child in error:
-                if child.tag == "{{{}}}text".format(STANZAS_NS):
-                    continue
-                if child.tag.startswith("{{{}}}".format(STANZAS_NS)):
-                    condition = child.tag.rsplit("}", 1)[-1]
-                    break
-        log.error(
-            "XMPP IQ request rejected payload=%s operation=%s code=%s "
-            "error_type=%s condition=%s server_text=%s",
-            payload.tag.rsplit("}", 1)[-1],
-            payload.attrib.get("op"),
-            code,
-            error_type,
-            condition,
-            server_text,
-        )
 
     async def close(self) -> None:
         if self._closed:
