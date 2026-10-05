@@ -113,8 +113,9 @@ class TelegramClient(Protocol):
 
 TelegramClientFactory = Callable[[Optional[str]], TelegramClient]
 TelegramAvatarStore = Callable[
-    [TelegramClient, object, int, str], Awaitable[Optional[Avatar]]
+    [BindingId, TelegramClient, object, int, str], Awaitable[Optional[Avatar]]
 ]
+TelegramAvatarRemove = Callable[[BindingId, int], Awaitable[None]]
 
 
 async def _resolve_telegram_entity(
@@ -223,13 +224,15 @@ class TelegramBackendSession:
         client_factory: TelegramClientFactory,
         media_register: Callable[[BindingId, int, int, str, str, Optional[int]], str],
         avatar_store: TelegramAvatarStore,
-        session_started: Callable[[BindingId, str], None],
-        session_stopped: Callable[[BindingId, str], None],
+        avatar_remove: TelegramAvatarRemove,
+        session_started: Callable[[BindingId, str], Awaitable[None]],
+        session_stopped: Callable[[BindingId, str], Awaitable[None]],
     ) -> None:
         self._binding_id = binding_id
         self._event_sink = event_sink
         self._media_register = media_register
         self._avatar_store = avatar_store
+        self._avatar_remove = avatar_remove
         self._session_started = session_started
         self._session_stopped = session_stopped
         self._session_data = session_data
@@ -267,7 +270,7 @@ class TelegramBackendSession:
             self._install_message_handler()
             self._started = True
             await self._synchronize_contacts()
-            self._session_started(self._binding_id, self._session_data)
+            await self._session_started(self._binding_id, self._session_data)
         except Exception as exc:
             await self._publish_state(SessionState.FAILED, type(exc).__name__)
             raise BackendUnavailable("Telegram session failed to start") from exc
@@ -278,7 +281,7 @@ class TelegramBackendSession:
             return
         self._closed = True
         self._started = False
-        self._session_stopped(self._binding_id, self._session_data)
+        await self._session_stopped(self._binding_id, self._session_data)
         await self._client.disconnect()
         await self._publish_state(SessionState.STOPPED)
 
@@ -492,15 +495,23 @@ class TelegramBackendSession:
                 downloaded.append(path)
         return downloaded
 
-    async def _avatar(self, entity) -> Optional[Avatar]:  # type: ignore[no-untyped-def]
+    async def _avatar(
+        self, entity, peer_id: Optional[int] = None
+    ) -> Optional[Avatar]:  # type: ignore[no-untyped-def]
         photo = getattr(entity, "photo", None)
         photo_id = getattr(photo, "photo_id", None)
+        entity_id = getattr(entity, "id", peer_id)
+        if entity_id is None:
+            return None
+        resolved_peer_id = int(entity_id)
         if photo_id is None:
+            await self._avatar_remove(self._binding_id, resolved_peer_id)
             return None
         return await self._avatar_store(
+            self._binding_id,
             self._client,
             entity,
-            int(getattr(entity, "id")),
+            resolved_peer_id,
             str(photo_id),
         )
 
@@ -819,7 +830,7 @@ class TelegramBackendSession:
             ),
             participants=tuple(participants.values()),
             avatar=(
-                await self._avatar(chat)
+                await self._avatar(chat, peer_id)
                 if chat is not None
                 else (existing.avatar if existing else None)
             ),
@@ -929,6 +940,9 @@ class TelegramBackendPlugin:
         self._media_stream_semaphores: dict[BindingId, asyncio.Semaphore] = {}
         self._media_stream_request_size = 524288
         self._web_module = None
+        self._avatar_unreferenced_ttl_days = 7
+        self._avatar_cleanup_interval_seconds = 86400
+        self._avatar_cleanup_task: Optional[asyncio.Task] = None
         self._avatar_cache = TelegramAvatarCache(
             "data/avatars/telegram", self._media_base_url, 524288
         )
@@ -972,12 +986,27 @@ class TelegramBackendPlugin:
             raise ValueError("avatar_max_bytes must be an integer") from None
         if avatar_max_bytes <= 0:
             raise ValueError("avatar_max_bytes must be positive")
+        try:
+            avatar_unreferenced_ttl_days = int(
+                options.get("avatar_unreferenced_ttl_days", "7")
+            )
+            avatar_cleanup_interval_seconds = int(
+                options.get("avatar_cleanup_interval_seconds", "86400")
+            )
+        except ValueError:
+            raise ValueError("Telegram avatar cleanup settings must be integers") from None
+        if avatar_unreferenced_ttl_days < 0:
+            raise ValueError("avatar_unreferenced_ttl_days must not be negative")
+        if avatar_cleanup_interval_seconds <= 0:
+            raise ValueError("avatar_cleanup_interval_seconds must be positive")
         self._avatar_cache = TelegramAvatarCache(
             avatar_storage_dir, avatar_base_url, avatar_max_bytes
         )
         self._api_hash = api_hash
         self._media_url_secret = media_url_secret.encode("utf-8")
         self._media_stream_request_size = media_stream_request_size
+        self._avatar_unreferenced_ttl_days = avatar_unreferenced_ttl_days
+        self._avatar_cleanup_interval_seconds = avatar_cleanup_interval_seconds
 
     def _create_client(self, session_data: Optional[str]) -> TelegramClient:
         if self._client_factory is not None:
@@ -1019,6 +1048,7 @@ class TelegramBackendPlugin:
             self._create_client,
             self._register_media,
             self._store_avatar,
+            self._remove_avatar,
             self._session_started,
             self._session_stopped,
         )
@@ -1057,22 +1087,34 @@ class TelegramBackendPlugin:
             self._media_base_url.rstrip("/"), token, quote(file_name)
         )
 
-    def _session_started(self, binding_id: BindingId, session_data: str) -> None:
+    async def _session_started(self, binding_id: BindingId, session_data: str) -> None:
         self._active_sessions[binding_id] = session_data
+        if self._avatar_cleanup_task is None:
+            self._avatar_cleanup_task = asyncio.create_task(self._avatar_cleanup_loop())
 
-    def _session_stopped(self, binding_id: BindingId, session_data: str) -> None:
+    async def _session_stopped(self, binding_id: BindingId, session_data: str) -> None:
         if self._active_sessions.get(binding_id) == session_data:
             self._active_sessions.pop(binding_id, None)
             self._media_stream_semaphores.pop(binding_id, None)
+        if not self._active_sessions and self._avatar_cleanup_task is not None:
+            self._avatar_cleanup_task.cancel()
+            try:
+                await self._avatar_cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._avatar_cleanup_task = None
 
     async def _store_avatar(
         self,
+        binding_id: BindingId,
         client: TelegramClient,
         entity,
         peer_id: int,
         photo_id: str,
     ) -> Optional[Avatar]:  # type: ignore[no-untyped-def]
-        cached = await self._avatar_cache.store(client, entity, peer_id, photo_id)
+        cached = await self._avatar_cache.store(
+            client, entity, str(binding_id), peer_id, photo_id
+        )
         if cached is None:
             return None
         return Avatar(
@@ -1081,6 +1123,24 @@ class TelegramBackendPlugin:
             content_type=cached.mime_type,
             size=cached.bytes_count,
         )
+
+    async def _remove_avatar(self, binding_id: BindingId, peer_id: int) -> None:
+        await self._avatar_cache.forget(str(binding_id), peer_id)
+
+    async def _avatar_cleanup_loop(self) -> None:
+        while True:
+            try:
+                removed = await self._avatar_cache.cleanup_unreferenced(
+                    self._avatar_unreferenced_ttl_days
+                )
+                if removed:
+                    log.info("Removed %s unreferenced Telegram avatar(s)", removed)
+                await asyncio.sleep(self._avatar_cleanup_interval_seconds)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Telegram avatar cache cleanup failed")
+                await asyncio.sleep(self._avatar_cleanup_interval_seconds)
 
     async def avatar_handler(self, request):  # type: ignore[no-untyped-def]
         from aiohttp import web
