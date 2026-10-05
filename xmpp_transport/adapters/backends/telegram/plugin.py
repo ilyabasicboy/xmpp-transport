@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import logging
+import shutil
 from collections.abc import Awaitable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Callable, Optional, Protocol
@@ -48,6 +49,10 @@ from xmpp_transport.ports.events import BackendEventSink
 from .avatar_cache import TelegramAvatarCache
 
 log = logging.getLogger(__name__)
+
+MEDIA_PROXY_CONNECT_TIMEOUT_SECONDS = 15
+MEDIA_PROXY_LOOKUP_TIMEOUT_SECONDS = 15
+XABBER_VOICE_MIME_TYPE = "audio/webm;codecs=opus"
 
 
 class TelegramClient(Protocol):
@@ -95,6 +100,11 @@ class TelegramClient(Protocol):
         ...
 
     async def get_messages(self, entity, ids):  # type: ignore[no-untyped-def]
+        ...
+
+    def iter_download(
+        self, media, *, request_size: int, file_size=None
+    ):  # type: ignore[no-untyped-def]
         ...
 
     def add_event_handler(self, handler, event_builder) -> None:  # type: ignore[no-untyped-def]
@@ -211,10 +221,10 @@ class TelegramBackendSession:
         session_data: str,
         event_sink: BackendEventSink,
         client_factory: TelegramClientFactory,
-        media_register: Callable[[BindingId, int, int, str, str], str],
+        media_register: Callable[[BindingId, int, int, str, str, Optional[int]], str],
         avatar_store: TelegramAvatarStore,
-        session_started: Callable[[BindingId, TelegramClient], None],
-        session_stopped: Callable[[BindingId, TelegramClient], None],
+        session_started: Callable[[BindingId, str], None],
+        session_stopped: Callable[[BindingId, str], None],
     ) -> None:
         self._binding_id = binding_id
         self._event_sink = event_sink
@@ -222,6 +232,7 @@ class TelegramBackendSession:
         self._avatar_store = avatar_store
         self._session_started = session_started
         self._session_stopped = session_stopped
+        self._session_data = session_data
         self._client = client_factory(session_data)
         self._started = False
         self._closed = False
@@ -256,7 +267,7 @@ class TelegramBackendSession:
             self._install_message_handler()
             self._started = True
             await self._synchronize_contacts()
-            self._session_started(self._binding_id, self._client)
+            self._session_started(self._binding_id, self._session_data)
         except Exception as exc:
             await self._publish_state(SessionState.FAILED, type(exc).__name__)
             raise BackendUnavailable("Telegram session failed to start") from exc
@@ -267,7 +278,7 @@ class TelegramBackendSession:
             return
         self._closed = True
         self._started = False
-        self._session_stopped(self._binding_id, self._client)
+        self._session_stopped(self._binding_id, self._session_data)
         await self._client.disconnect()
         await self._publish_state(SessionState.STOPPED)
 
@@ -728,6 +739,8 @@ class TelegramBackendSession:
                 else "application/octet-stream"
             )
         kind = self._media_kind(mime_type, is_sticker)
+        if is_voice:
+            mime_type = XABBER_VOICE_MIME_TYPE
         file_name = str(getattr(file_info, "name", "") or "") or "telegram-{}{}".format(
             getattr(event, "id", "media"), self._media_extension(mime_type)
         )
@@ -737,6 +750,7 @@ class TelegramBackendSession:
             int(getattr(event, "id")),
             mime_type,
             file_name,
+            None if is_voice else getattr(file_info, "size", None),
         )
         return (
             Media(
@@ -749,7 +763,7 @@ class TelegramBackendSession:
                 kind=kind,
                 content_type=mime_type,
                 file_name=file_name,
-                size=getattr(file_info, "size", None),
+                size=None if is_voice else getattr(file_info, "size", None),
                 source_url=source_url,
                 width=getattr(file_info, "width", None),
                 height=getattr(file_info, "height", None),
@@ -776,6 +790,7 @@ class TelegramBackendSession:
             "image/png": ".png",
             "video/mp4": ".mp4",
             "audio/ogg": ".ogg",
+            XABBER_VOICE_MIME_TYPE: ".webm",
         }.get(mime_type.lower(), "")
 
     async def _update_group_from_event(
@@ -910,7 +925,10 @@ class TelegramBackendPlugin:
         self._api_hash = ""
         self._media_base_url = "http://127.0.0.1:8080"
         self._media_url_secret = b""
-        self._active_clients: dict[BindingId, TelegramClient] = {}
+        self._active_sessions: dict[BindingId, str] = {}
+        self._media_stream_semaphores: dict[BindingId, asyncio.Semaphore] = {}
+        self._media_stream_request_size = 524288
+        self._web_module = None
         self._avatar_cache = TelegramAvatarCache(
             "data/avatars/telegram", self._media_base_url, 524288
         )
@@ -928,6 +946,14 @@ class TelegramBackendPlugin:
         media_url_secret = options.get("media_url_secret", "").strip()
         if len(media_url_secret) < 32:
             raise ValueError("media_url_secret must contain at least 32 characters")
+        try:
+            media_stream_request_size = int(
+                options.get("media_stream_request_size", "524288")
+            )
+        except ValueError:
+            raise ValueError("media_stream_request_size must be an integer") from None
+        if media_stream_request_size <= 0:
+            raise ValueError("media_stream_request_size must be positive")
         self._api_id = api_id
         self._media_base_url = options.get("media_base_url", self._media_base_url).strip()
         if not self._media_base_url.startswith(("http://", "https://")):
@@ -951,6 +977,7 @@ class TelegramBackendPlugin:
         )
         self._api_hash = api_hash
         self._media_url_secret = media_url_secret.encode("utf-8")
+        self._media_stream_request_size = media_stream_request_size
 
     def _create_client(self, session_data: Optional[str]) -> TelegramClient:
         if self._client_factory is not None:
@@ -1003,6 +1030,7 @@ class TelegramBackendPlugin:
         message_id: int,
         mime_type: str,
         file_name: str,
+        bytes_count: Optional[int],
     ) -> str:
         payload = self._encode_url_part(
             json.dumps(
@@ -1012,6 +1040,7 @@ class TelegramBackendPlugin:
                     "message_id": message_id,
                     "mime_type": mime_type,
                     "file_name": file_name,
+                    "bytes_count": bytes_count,
                 },
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -1028,12 +1057,13 @@ class TelegramBackendPlugin:
             self._media_base_url.rstrip("/"), token, quote(file_name)
         )
 
-    def _session_started(self, binding_id: BindingId, client: TelegramClient) -> None:
-        self._active_clients[binding_id] = client
+    def _session_started(self, binding_id: BindingId, session_data: str) -> None:
+        self._active_sessions[binding_id] = session_data
 
-    def _session_stopped(self, binding_id: BindingId, client: TelegramClient) -> None:
-        if self._active_clients.get(binding_id) is client:
-            self._active_clients.pop(binding_id, None)
+    def _session_stopped(self, binding_id: BindingId, session_data: str) -> None:
+        if self._active_sessions.get(binding_id) == session_data:
+            self._active_sessions.pop(binding_id, None)
+            self._media_stream_semaphores.pop(binding_id, None)
 
     async def _store_avatar(
         self,
@@ -1068,7 +1098,11 @@ class TelegramBackendPlugin:
         )
 
     async def media_handler(self, request):  # type: ignore[no-untyped-def]
-        from aiohttp import web
+        web = self._web_module
+        if web is None:
+            from aiohttp import web as aiohttp_web
+
+            web = aiohttp_web
 
         try:
             value = self._decode_media_token(request.match_info["token"])
@@ -1077,33 +1111,146 @@ class TelegramBackendPlugin:
             message_id = int(value["message_id"])
             mime_type = str(value["mime_type"])
             file_name = str(value["file_name"])
+            bytes_value = value.get("bytes_count")
+            bytes_count = int(bytes_value) if bytes_value is not None else None
         except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
             raise web.HTTPNotFound()
-        client = self._active_clients.get(binding_id)
-        if client is None:
+        session_data = self._active_sessions.get(binding_id)
+        if session_data is None:
             raise web.HTTPNotFound()
+        semaphore = self._media_stream_semaphores.setdefault(
+            binding_id, asyncio.Semaphore(1)
+        )
+        await semaphore.acquire()
+        client = self._create_client(session_data)
+        response = None
         try:
-            entity = await _resolve_telegram_entity(client, peer_id)
-            message = await client.get_messages(entity, ids=message_id)
-        except BackendUnavailable:
-            raise web.HTTPNotFound()
-        media = getattr(message, "media", None) if message is not None else None
-        if media is None:
-            raise web.HTTPNotFound()
-        content = await client.download_media(media, file=bytes)
-        safe_name = file_name.replace("\\", "_").replace('"', "_")
-        safe_name = safe_name.replace("\r", "_").replace("\n", "_")
-        if not content:
-            raise web.HTTPNotFound()
-        return web.Response(
-            body=content,
-            headers={
+            await asyncio.wait_for(
+                client.connect(), timeout=MEDIA_PROXY_CONNECT_TIMEOUT_SECONDS
+            )
+            if not await client.is_user_authorized():
+                raise web.HTTPNotFound()
+            entity = await asyncio.wait_for(
+                _resolve_telegram_entity(client, peer_id),
+                timeout=MEDIA_PROXY_LOOKUP_TIMEOUT_SECONDS,
+            )
+            message = await asyncio.wait_for(
+                client.get_messages(entity, ids=message_id),
+                timeout=MEDIA_PROXY_LOOKUP_TIMEOUT_SECONDS,
+            )
+            media = getattr(message, "media", None) if message is not None else None
+            if media is None:
+                raise web.HTTPNotFound()
+            safe_name = file_name.replace("\\", "_").replace('"', "_")
+            safe_name = safe_name.replace("\r", "_").replace("\n", "_")
+            headers = {
                 "Content-Type": mime_type,
                 "Content-Disposition": 'inline; filename="{}"'.format(safe_name),
                 "Cache-Control": "private, max-age=300",
                 "Access-Control-Allow-Origin": "*",
-            },
+                "Access-Control-Expose-Headers": (
+                    "Content-Length, Content-Type, Content-Disposition"
+                ),
+            }
+            if bytes_count is not None and not self._is_xabber_voice(mime_type):
+                headers["Content-Length"] = str(bytes_count)
+            response = web.StreamResponse(status=200, headers=headers)
+            await response.prepare(request)
+            if self._is_xabber_voice(mime_type):
+                await self._stream_voice(response, client, media, bytes_count)
+            else:
+                async for chunk in client.iter_download(
+                    media,
+                    request_size=self._media_stream_request_size,
+                    file_size=bytes_count,
+                ):
+                    await response.write(bytes(chunk))
+            await response.write_eof()
+            return response
+        except BackendUnavailable:
+            raise web.HTTPNotFound()
+        except ConnectionResetError:
+            return response if response is not None else web.Response(status=204)
+        except asyncio.TimeoutError:
+            raise web.HTTPGatewayTimeout()
+        finally:
+            try:
+                await client.disconnect()
+            finally:
+                semaphore.release()
+
+    async def _stream_voice(
+        self, response, client: TelegramClient, media, bytes_count: Optional[int]
+    ) -> None:  # type: ignore[no-untyped-def]
+        web = self._web_module
+        if web is None:
+            from aiohttp import web as aiohttp_web
+
+            web = aiohttp_web
+
+        if shutil.which("ffmpeg") is None:
+            raise web.HTTPInternalServerError(
+                reason="ffmpeg is required to convert Telegram voice messages"
+            )
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-c:a",
+            "copy",
+            "-f",
+            "webm",
+            "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        writer = asyncio.create_task(
+            self._write_voice_input(process, client, media, bytes_count)
+        )
+        try:
+            while True:
+                chunk = await process.stdout.read(65536)
+                if not chunk:
+                    break
+                await response.write(chunk)
+            await writer
+            stderr = await process.stderr.read()
+            if await process.wait() != 0:
+                log.warning("Telegram voice conversion failed: %s", stderr[:500])
+                raise web.HTTPBadGateway(reason="Telegram voice conversion failed")
+        finally:
+            if not writer.done():
+                writer.cancel()
+                try:
+                    await writer
+                except asyncio.CancelledError:
+                    pass
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+
+    async def _write_voice_input(
+        self, process, client: TelegramClient, media, bytes_count: Optional[int]
+    ) -> None:  # type: ignore[no-untyped-def]
+        try:
+            async for chunk in client.iter_download(
+                media,
+                request_size=self._media_stream_request_size,
+                file_size=bytes_count,
+            ):
+                process.stdin.write(bytes(chunk))
+                await process.stdin.drain()
+        finally:
+            process.stdin.close()
+            await process.stdin.wait_closed()
+
+    @staticmethod
+    def _is_xabber_voice(mime_type: str) -> bool:
+        return mime_type.replace(" ", "").lower() == XABBER_VOICE_MIME_TYPE
 
     def _decode_media_token(self, token: str) -> Mapping[str, object]:
         payload, separator, supplied_signature = token.rpartition(".")

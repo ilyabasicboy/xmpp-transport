@@ -150,6 +150,14 @@ class FakeClient:
         self.resolved_media = (entity.id, ids)
         return type("StoredMessage", (), {"id": ids, "media": object()})()
 
+    async def iter_download(
+        self, media, *, request_size, file_size=None
+    ):  # type: ignore[no-untyped-def]
+        self.download_request = (media, request_size, file_size)
+        midpoint = len(self.downloaded_media) // 2
+        yield self.downloaded_media[:midpoint]
+        yield self.downloaded_media[midpoint:]
+
     def add_event_handler(self, handler, event_builder):  # type: ignore[no-untyped-def]
         self.handler = handler
 
@@ -181,6 +189,34 @@ class Sink:
 
     async def publish(self, event):  # type: ignore[no-untyped-def]
         self.events.append(event)
+
+
+class StreamResponse:
+    def __init__(self, status, headers):  # type: ignore[no-untyped-def]
+        self.status = status
+        self.headers = headers
+        self.body = bytearray()
+
+    async def prepare(self, request):  # type: ignore[no-untyped-def]
+        return self
+
+    async def write(self, chunk):  # type: ignore[no-untyped-def]
+        self.body.extend(chunk)
+
+    async def write_eof(self):
+        return None
+
+
+class StreamingWeb:
+    from aiohttp.web import (
+        HTTPBadGateway,
+        HTTPGatewayTimeout,
+        HTTPInternalServerError,
+        HTTPNotFound,
+        Response,
+    )
+
+    StreamResponse = StreamResponse
 
 
 class TelegramAuthenticationTests(unittest.IsolatedAsyncioTestCase):
@@ -237,6 +273,14 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
             b"stored-session",
             self.sink,  # type: ignore[arg-type]
         )
+
+    async def _fetch_media(self, plugin, source_url):  # type: ignore[no-untyped-def]
+        path = source_url.split("/media/", 1)[1]
+        token, _filename = path.split("/", 1)
+        request = type("Request", (), {"match_info": {"token": token}})()
+        plugin._web_module = StreamingWeb
+        response = await plugin.media_handler(request)
+        return response.status, bytes(response.body), dict(response.headers)
 
     async def test_syncs_contacts_and_sends_direct_text(self) -> None:
         await self.session.start()
@@ -506,11 +550,70 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("photo.jpg", media.file_name)
         self.assertEqual((640, 480), (media.width, media.height))
         self.assertTrue(media.source_url.startswith("http://127.0.0.1:8080/media/"))
-        token = media.source_url.split("/media/", 1)[1].split("/", 1)[0]
-        request = type("Request", (), {"match_info": {"token": token}})()
-        response = await self.plugin.media_handler(request)
-        self.assertEqual(b"telegram-media", response.body)
-        self.assertEqual("image/jpeg", response.headers["Content-Type"])
+        status, body, headers = await self._fetch_media(self.plugin, media.source_url)
+        self.assertEqual(200, status)
+        self.assertEqual(b"telegram-media", body)
+        self.assertEqual("image/jpeg", headers["Content-Type"])
+        self.assertEqual(524288, self.client.download_request[1])
+
+    async def test_streams_incoming_voice_as_xabber_webm(self) -> None:
+        await self.session.start()
+        file_info = type(
+            "File",
+            (),
+            {
+                "mime_type": "audio/ogg",
+                "name": "voice.ogg",
+                "size": 100,
+                "width": None,
+                "height": None,
+                "duration": 3,
+            },
+        )()
+        message = type(
+            "Message",
+            (),
+            {
+                "reply_to_msg_id": None,
+                "media": object(),
+                "file": file_info,
+                "photo": None,
+                "voice": object(),
+                "sticker": None,
+            },
+        )()
+        event = type(
+            "Event",
+            (),
+            {
+                "out": False,
+                "is_private": True,
+                "raw_text": "",
+                "chat_id": 100,
+                "sender_id": 100,
+                "id": 60,
+                "date": datetime.now(timezone.utc),
+                "message": message,
+            },
+        )()
+
+        await self.client.handler(event)
+        received = [item for item in self.sink.events if isinstance(item, MessageReceived)]
+        media = received[-1].message.media[0]
+
+        async def stream_voice(response, client, telegram_media, bytes_count):  # type: ignore[no-untyped-def]
+            self.assertIsNone(bytes_count)
+            await response.write(b"converted-voice")
+
+        self.plugin._stream_voice = stream_voice
+        status, body, headers = await self._fetch_media(self.plugin, media.source_url)
+
+        self.assertTrue(media.voice)
+        self.assertIsNone(media.size)
+        self.assertEqual("audio/webm;codecs=opus", media.content_type)
+        self.assertEqual(200, status)
+        self.assertEqual(b"converted-voice", body)
+        self.assertEqual("audio/webm;codecs=opus", headers["Content-Type"])
 
     async def test_resolves_signed_media_url_after_plugin_restart(self) -> None:
         await self.session.start()
@@ -571,18 +674,20 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
             BindingId("binding-1"), b"stored-session", Sink()  # type: ignore[arg-type]
         )
         await restored_session.start()
-        request = type("Request", (), {"match_info": {"token": token}})()
+        source_url = received[-1].message.media[0].source_url
+        status, body, _headers = await self._fetch_media(
+            restored_plugin, source_url
+        )
 
-        response = await restored_plugin.media_handler(request)
-
-        self.assertEqual(b"telegram-media", response.body)
+        self.assertEqual(200, status)
+        self.assertEqual(b"telegram-media", body)
         self.assertEqual((100, 59), restored_client.resolved_media)
         await restored_session.close()
 
     async def test_rejects_modified_media_url(self) -> None:
         await self.session.start()
         token = self.plugin._register_media(
-            BindingId("binding-1"), 100, 59, "image/jpeg", "photo.jpg"
+            BindingId("binding-1"), 100, 59, "image/jpeg", "photo.jpg", 14
         )
         signed_token = token.split("/media/", 1)[1].split("/", 1)[0]
         replacement = "A" if signed_token[-1] != "A" else "B"
