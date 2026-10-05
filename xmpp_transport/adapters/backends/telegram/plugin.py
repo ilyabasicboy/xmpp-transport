@@ -200,6 +200,7 @@ class TelegramBackendSession:
         self._owner_id: Optional[int] = None
         self._conversations = {}
         self._sent_group_messages = set()
+        self._listener_started_at: Optional[datetime] = None
 
     @property
     def binding_id(self) -> BindingId:
@@ -212,6 +213,7 @@ class TelegramBackendSession:
             return
         await self._publish_state(SessionState.STARTING)
         try:
+            self._listener_started_at = datetime.now(timezone.utc)
             await self._client.connect()
             if not await self._client.is_user_authorized():
                 await self._event_sink.publish(
@@ -556,6 +558,8 @@ class TelegramBackendSession:
         self._client.add_event_handler(handle, events.NewMessage())
 
     async def _receive_message(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._is_stale_event(event):
+            return
         is_group = self._is_group_event(event)
         if getattr(event, "out", False) and not is_group:
             return
@@ -620,6 +624,18 @@ class TelegramBackendSession:
                 ),
             )
         )
+
+    def _is_stale_event(self, event) -> bool:  # type: ignore[no-untyped-def]
+        if self._listener_started_at is None:
+            return False
+        event_date = getattr(event, "date", None)
+        if event_date is None:
+            event_date = getattr(getattr(event, "message", None), "date", None)
+        if event_date is None:
+            return False
+        if event_date.tzinfo is None:
+            event_date = event_date.replace(tzinfo=timezone.utc)
+        return event_date < self._listener_started_at
 
 
     def _incoming_forward(

@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from xmpp_transport.adapters.backends.telegram import (
@@ -159,8 +159,10 @@ class GroupEvent:
     chat_id = -300
     sender_id = 300
     id = 56
-    date = datetime.now(timezone.utc)
     message = type("Message", (), {"reply_to_msg_id": None})()
+
+    def __init__(self) -> None:
+        self.date = datetime.now(timezone.utc)
 
     async def get_chat(self):  # type: ignore[no-untyped-def]
         return type("Chat", (), {"title": "Group"})()
@@ -273,6 +275,50 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(received))
         self.assertEqual("hello from Telegram", received[0].message.text)
         self.assertEqual(RemoteObjectId("44"), received[0].message.reply_to.message_id)
+
+    async def test_ignores_message_queued_before_listener_start(self) -> None:
+        await self.session.start()
+        event = type(
+            "Event",
+            (),
+            {
+                "out": False,
+                "is_private": True,
+                "raw_text": "old Telegram message",
+                "chat_id": 100,
+                "sender_id": 100,
+                "id": 54,
+                "date": datetime.now(timezone.utc) - timedelta(minutes=1),
+                "message": type("Message", (), {"reply_to_msg_id": None})(),
+            },
+        )()
+
+        await self.client.handler(event)
+
+        received = [item for item in self.sink.events if isinstance(item, MessageReceived)]
+        self.assertEqual([], received)
+
+    async def test_accepts_naive_message_date_after_listener_start(self) -> None:
+        await self.session.start()
+        event = type(
+            "Event",
+            (),
+            {
+                "out": False,
+                "is_private": True,
+                "raw_text": "new Telegram message",
+                "chat_id": 100,
+                "sender_id": 100,
+                "id": 56,
+                "date": datetime.now() + timedelta(seconds=1),
+                "message": type("Message", (), {"reply_to_msg_id": None})(),
+            },
+        )()
+
+        await self.client.handler(event)
+
+        received = [item for item in self.sink.events if isinstance(item, MessageReceived)]
+        self.assertEqual(["new Telegram message"], [item.message.text for item in received])
 
     async def test_syncs_contact_and_group_avatars(self) -> None:
         await self.session.start()
