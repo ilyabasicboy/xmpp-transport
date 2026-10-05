@@ -326,6 +326,7 @@ def compose_single_backend(
             config.http.host,
             config.http.port,
             media_handler=getattr(plugin, "media_handler", None),
+            avatar_handler=getattr(plugin, "avatar_handler", None),
         ),
         wire=SlixmppComponentWire(component),
         cipher=FernetCredentialCipher(config.credential_key(environment)),

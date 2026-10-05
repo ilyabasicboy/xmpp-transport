@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 .env
 transports.ini
+data/
 build/
 dist/
 *.egg-info/

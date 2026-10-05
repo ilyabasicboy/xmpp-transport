@@ -95,6 +95,23 @@ class HealthHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         await server.close()
 
+    async def test_registers_optional_avatar_cache(self) -> None:
+        web = FakeWeb()
+
+        async def avatar_handler(request):  # type: ignore[no-untyped-def]
+            return request
+
+        server = AiohttpHealthServer(
+            HealthState(), "127.0.0.1", 8080, web, avatar_handler=avatar_handler
+        )
+        await server.start()
+
+        self.assertEqual(
+            ["/avatar/{filename}", "/live", "/ready"],
+            [path for path, _ in web.application.router.routes],
+        )
+        await server.close()
+
     async def test_readiness_changes_response_status(self) -> None:
         health = HealthState()
         web = FakeWeb()

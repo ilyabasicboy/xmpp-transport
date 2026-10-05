@@ -1,14 +1,12 @@
 """Telethon-backed Telegram adapter preserving the original transport behavior."""
 
 import asyncio
-import hashlib
 import logging
 import secrets
+from collections.abc import Awaitable, Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Callable, Mapping, Optional, Protocol, Sequence
+from typing import Callable, Optional, Protocol
 from urllib.parse import quote
-from urllib.parse import quote
-from typing import Callable, Mapping, Optional, Protocol, Sequence
 from uuid import uuid4
 
 from xmpp_transport.domain.auth import AuthChallenge, AuthResponse, AuthResponseKind, AuthState
@@ -28,12 +26,12 @@ from xmpp_transport.domain.models import (
     Contact,
     Conversation,
     ConversationKind,
-    IncomingMessage,
-    OutgoingMessage,
     ForwardReference,
-    Participant,
+    IncomingMessage,
     Media,
     MediaKind,
+    OutgoingMessage,
+    Participant,
     ReplyReference,
 )
 from xmpp_transport.ports.backend import (
@@ -44,6 +42,7 @@ from xmpp_transport.ports.backend import (
 )
 from xmpp_transport.ports.events import BackendEventSink
 
+from .avatar_cache import TelegramAvatarCache
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +96,9 @@ class TelegramClient(Protocol):
 
 
 TelegramClientFactory = Callable[[Optional[str]], TelegramClient]
+TelegramAvatarStore = Callable[
+    [TelegramClient, object, int, str], Awaitable[Optional[Avatar]]
+]
 
 
 class TelegramAuthenticationFlow:
@@ -186,12 +188,12 @@ class TelegramBackendSession:
         event_sink: BackendEventSink,
         client_factory: TelegramClientFactory,
         media_register: Callable[[TelegramClient, object, str, str], str],
-        avatar_register: Callable[[TelegramClient, object, str], str],
+        avatar_store: TelegramAvatarStore,
     ) -> None:
         self._binding_id = binding_id
         self._event_sink = event_sink
         self._media_register = media_register
-        self._avatar_register = avatar_register
+        self._avatar_store = avatar_store
         self._client = client_factory(session_data)
         self._started = False
         self._closed = False
@@ -447,16 +449,16 @@ class TelegramBackendSession:
                 downloaded.append(path)
         return downloaded
 
-    def _avatar(self, entity) -> Optional[Avatar]:  # type: ignore[no-untyped-def]
+    async def _avatar(self, entity) -> Optional[Avatar]:  # type: ignore[no-untyped-def]
         photo = getattr(entity, "photo", None)
         photo_id = getattr(photo, "photo_id", None)
         if photo_id is None:
             return None
-        version = str(photo_id)
-        return Avatar(
-            reference=self._avatar_register(self._client, entity, version),
-            version=version,
-            content_type="image/jpeg",
+        return await self._avatar_store(
+            self._client,
+            entity,
+            int(getattr(entity, "id")),
+            str(photo_id),
         )
 
     async def _synchronize_contacts(self) -> None:
@@ -490,7 +492,7 @@ class TelegramBackendSession:
                         else ConversationKind.GROUP
                     ),
                     title=dialog.name or "Telegram group {}".format(peer_id),
-                    avatar=self._avatar(dialog.entity),
+                    avatar=await self._avatar(dialog.entity),
                     attributes=self._conversation_attributes(),
                 )
                 self._conversations[peer_id] = conversation
@@ -508,7 +510,7 @@ class TelegramBackendSession:
                 RemoteObjectId(str(peer_id)),
                 self._user_title(user),
                 username=getattr(user, "username", None),
-                avatar=self._avatar(user),
+                avatar=await self._avatar(user),
             )
         async for dialog in self._client.iter_dialogs():
             if bool(getattr(dialog, "is_group", False)) or bool(
@@ -521,7 +523,7 @@ class TelegramBackendSession:
                     RemoteObjectId(str(peer_id)),
                     dialog.name or self._user_title(dialog.entity),
                     username=getattr(dialog.entity, "username", None),
-                    avatar=self._avatar(dialog.entity),
+                    avatar=await self._avatar(dialog.entity),
                 )
         return tuple(sorted(contacts.values(), key=lambda item: item.display_name.casefold()))
 
@@ -763,7 +765,7 @@ class TelegramBackendSession:
             ),
             participants=tuple(participants.values()),
             avatar=(
-                self._avatar(chat)
+                await self._avatar(chat)
                 if chat is not None
                 else (existing.avatar if existing else None)
             ),
@@ -869,6 +871,9 @@ class TelegramBackendPlugin:
         self._api_hash = ""
         self._media_base_url = "http://127.0.0.1:8080"
         self._media_references = {}
+        self._avatar_cache = TelegramAvatarCache(
+            "data/avatars/telegram", self._media_base_url, 524288
+        )
 
     def configure(self, options: Mapping[str, str]) -> None:
         try:
@@ -884,6 +889,23 @@ class TelegramBackendPlugin:
         self._media_base_url = options.get("media_base_url", self._media_base_url).strip()
         if not self._media_base_url.startswith(("http://", "https://")):
             raise ValueError("media_base_url must use HTTP or HTTPS")
+        avatar_base_url = options.get("avatar_base_url", self._media_base_url).strip()
+        if not avatar_base_url.startswith(("http://", "https://")):
+            raise ValueError("avatar_base_url must use HTTP or HTTPS")
+        avatar_storage_dir = options.get(
+            "avatar_storage_dir", "data/avatars/telegram"
+        ).strip()
+        if not avatar_storage_dir:
+            raise ValueError("avatar_storage_dir must not be empty")
+        try:
+            avatar_max_bytes = int(options.get("avatar_max_bytes", "524288"))
+        except ValueError:
+            raise ValueError("avatar_max_bytes must be an integer") from None
+        if avatar_max_bytes <= 0:
+            raise ValueError("avatar_max_bytes must be positive")
+        self._avatar_cache = TelegramAvatarCache(
+            avatar_storage_dir, avatar_base_url, avatar_max_bytes
+        )
         self._api_hash = api_hash
 
     def _create_client(self, session_data: Optional[str]) -> TelegramClient:
@@ -925,9 +947,7 @@ class TelegramBackendPlugin:
             event_sink,
             self._create_client,
             self._register_media,
-            lambda client, entity, photo_id: self._register_avatar(
-                binding_id, client, entity, photo_id
-            ),
+            self._store_avatar,
         )
 
     def _register_media(
@@ -943,20 +963,36 @@ class TelegramBackendPlugin:
             self._media_base_url.rstrip("/"), token, quote(file_name)
         )
 
-    def _register_avatar(
+    async def _store_avatar(
         self,
-        binding_id: BindingId,
         client: TelegramClient,
         entity,
+        peer_id: int,
         photo_id: str,
-    ) -> str:  # type: ignore[no-untyped-def]
-        key = (str(binding_id), str(getattr(entity, "id", "unknown")), photo_id)
-        token = hashlib.sha256("|".join(key).encode("utf-8")).hexdigest()
-        self._media_references[token] = (
-            "avatar", client, entity, "image/jpeg", "avatar-{}.jpg".format(photo_id)
+    ) -> Optional[Avatar]:  # type: ignore[no-untyped-def]
+        cached = await self._avatar_cache.store(client, entity, peer_id, photo_id)
+        if cached is None:
+            return None
+        return Avatar(
+            reference=cached.url,
+            version=cached.avatar_id,
+            content_type=cached.mime_type,
+            size=cached.bytes_count,
         )
-        return "{}/media/{}/avatar-{}.jpg".format(
-            self._media_base_url.rstrip("/"), token, quote(photo_id)
+
+    async def avatar_handler(self, request):  # type: ignore[no-untyped-def]
+        from aiohttp import web
+
+        path = self._avatar_cache.path(request.match_info["filename"])
+        if path is None:
+            raise web.HTTPNotFound()
+        return web.FileResponse(
+            path,
+            headers={
+                "Content-Type": "image/jpeg",
+                "Cache-Control": "public, max-age=31536000, immutable",
+                "Access-Control-Allow-Origin": "*",
+            },
         )
 
     async def media_handler(self, request):  # type: ignore[no-untyped-def]
@@ -965,13 +1001,8 @@ class TelegramBackendPlugin:
         reference = self._media_references.get(request.match_info["token"])
         if reference is None:
             raise web.HTTPNotFound()
-        kind, client, value, mime_type, file_name = reference
-        if kind == "avatar":
-            content = await client.download_profile_photo(
-                value, file=bytes, download_big=False
-            )
-        else:
-            content = await client.download_media(value, file=bytes)
+        _kind, client, value, mime_type, file_name = reference
+        content = await client.download_media(value, file=bytes)
         safe_name = file_name.replace("\\", "_").replace('"', "_")
         safe_name = safe_name.replace("\r", "_").replace("\n", "_")
         if not content:

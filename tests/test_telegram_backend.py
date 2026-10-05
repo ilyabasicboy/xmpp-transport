@@ -1,5 +1,7 @@
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from xmpp_transport.adapters.backends.telegram import (
     TelegramAuthenticationFlow,
@@ -22,7 +24,7 @@ from xmpp_transport.domain.models import (
     OutgoingMessage,
     ReplyReference,
 )
-from xmpp_transport.ports.backend import ConversationSource, ContactSource, MessageSender
+from xmpp_transport.ports.backend import ContactSource, ConversationSource, MessageSender
 
 
 class PasswordRequired(RuntimeError):
@@ -210,7 +212,19 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.client = FakeClient("stored-session")
         self.sink = Sink()
+        self.avatar_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.avatar_directory.cleanup)
         self.plugin = TelegramBackendPlugin(lambda session: self.client)
+        self.plugin.configure(
+            {
+                "api_id": "123456",
+                "api_hash": "test-api-hash",
+                "media_base_url": "http://127.0.0.1:8080",
+                "avatar_base_url": "http://127.0.0.1:8080",
+                "avatar_storage_dir": self.avatar_directory.name,
+                "avatar_max_bytes": "524288",
+            }
+        )
         self.session = self.plugin.create_session(
             BindingId("binding-1"),
             b"stored-session",
@@ -268,14 +282,16 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         alice = next(item for item in contacts if item.id == RemoteObjectId("100"))
         group = next(item for item in conversations if item.id == RemoteObjectId("-300"))
 
-        self.assertEqual("123", alice.avatar.version)
-        self.assertEqual("777", group.avatar.version)
-        self.assertEqual(alice.avatar.reference, (await self.session.contacts())[0].avatar.reference)
-        token = alice.avatar.reference.split("/media/", 1)[1].split("/", 1)[0]
-        request = type("Request", (), {"match_info": {"token": token}})()
-        response = await self.plugin.media_handler(request)
-        self.assertEqual(b"telegram-avatar", response.body)
-        self.assertEqual([(100, False)], self.client.downloaded_avatars)
+        self.assertTrue(alice.avatar.version.startswith("telegram-100-123-"))
+        self.assertTrue(group.avatar.version.startswith("telegram--300-777-"))
+        self.assertEqual(len(b"telegram-avatar"), alice.avatar.size)
+        self.assertEqual(
+            alice.avatar.reference,
+            (await self.session.contacts())[0].avatar.reference,
+        )
+        filename = alice.avatar.reference.rsplit("/", 1)[-1]
+        self.assertTrue((Path(self.avatar_directory.name) / filename).is_file())
+        self.assertTrue(self.client.downloaded_avatars)
 
     async def test_updates_group_avatar_from_service_event(self) -> None:
         # The original transport creates a group only on its first message.
@@ -297,7 +313,9 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
             for item in self.sink.events
             if isinstance(item, ConversationChanged)
         ]
-        self.assertEqual("888", conversations[-1].avatar.version)
+        self.assertTrue(
+            conversations[-1].avatar.version.startswith("telegram--300-888-")
+        )
 
     async def test_sends_reply_to_telegram_message(self) -> None:
         await self.session.start()
