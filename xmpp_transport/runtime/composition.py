@@ -188,7 +188,6 @@ class SingleBackendRuntime:
                     else self._backend.name.upper(),
                 ),
             ),
-            self._backend.options.get("iq_auth_secret", ""),
         )
         roster_sync = RosterSync(AsyncpgRosterSyncRepository(pool), roster)
         dispatcher.register(ContactChanged, roster_sync.handle)

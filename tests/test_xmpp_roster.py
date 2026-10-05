@@ -1,5 +1,4 @@
 import unittest
-from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
 from xmpp_transport.adapters.xmpp.addressing import ContactAddressCodec
@@ -73,40 +72,6 @@ class XmppServerRosterTests(unittest.IsolatedAsyncioTestCase):
         assert query is not None
         self.assertEqual("remove-roster-contact", query.attrib["op"])
         self.assertIsNone(query.find("group"))
-
-    async def test_signs_privileged_roster_operation(self) -> None:
-        roster = XmppServerRoster(
-            self.wire,
-            Bindings(),  # type: ignore[arg-type]
-            ContactAddressCodec("telegram.example.com"),
-            "telegram.example.com",
-            "example.com",
-            "urn:xabber:transport:telegram:1",
-            ("Telegram",),
-            "a" * 32,
-        )
-
-        with patch("xmpp_transport.adapters.xmpp.roster.time.time", return_value=123):
-            with patch(
-                "xmpp_transport.adapters.xmpp.roster.secrets.token_hex",
-                return_value="0123456789abcdef0123456789abcdef",
-            ):
-                await roster.add_contact(BindingId("binding-1"), self.contact)
-
-        query = self.wire.requests[-1].find(
-            "{urn:xabber:transport:telegram:1}query"
-        )
-        assert query is not None
-        self.assertEqual("123", query.attrib["auth-timestamp"])
-        self.assertEqual(
-            "0123456789abcdef0123456789abcdef",
-            query.attrib["auth-nonce"],
-        )
-        self.assertEqual(
-            "a8b31289a4e11d403ce1965c9bdc2c5da95afee5aae93ffbd8e43f885f2b586d",
-            query.attrib["auth-signature"],
-        )
-
 
     async def test_add_contact_publishes_external_avatar_metadata(self) -> None:
         contact = Contact(
