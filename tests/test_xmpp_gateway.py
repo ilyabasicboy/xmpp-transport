@@ -278,6 +278,39 @@ class XmppGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Message without sender marker", self.router.outgoing[0].text)
         self.assertEqual([], self.wire.sent)
 
+    async def test_group_media_url_is_not_reintroduced_as_caption(self) -> None:
+        control = FakeControl()
+        gateway = XmppDirectMessageGateway(
+            self.wire,
+            DirectRouteResolver(BackendId("telegram"), self.addresses, self.bindings),
+            self.addresses,
+            self.bindings,
+            self.router,  # type: ignore[arg-type]
+            XmppMessageCodec(),
+            control=control,  # type: ignore[arg-type]
+            transport_namespace="urn:xabber:transport:telegram:1",
+            server_domain="example.com",
+            group_localpart_prefix="telegramg",
+        )
+        media_url = "http://127.0.0.1:8000/gallery/symlinks/token/example.png"
+        stanza = ET.fromstring(
+            """
+            <message from='telegramg-75736572406578616d706c652e636f6d-888@example.com'
+                     to='bot@telegram.example.com' type='chat' id='group-media-1'>
+              <body>user@example.com:\n{}</body>
+            </message>
+            """.format(media_url)
+        )
+
+        await gateway.handle_stanza(stanza)
+
+        self.assertEqual([], control.commands)
+        self.assertEqual(1, len(self.router.outgoing))
+        message = self.router.outgoing[0]
+        self.assertIsNone(message.text)
+        self.assertEqual(media_url, message.media[0].source_url)
+        self.assertEqual([], self.wire.sent)
+
     async def test_ignores_group_service_message_without_sender_marker(self) -> None:
         control = FakeControl()
         gateway = XmppDirectMessageGateway(

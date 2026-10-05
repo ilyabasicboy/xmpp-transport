@@ -100,7 +100,7 @@ class XmppDirectMessageGateway:
                 await self._messages.send(
                     replace(
                         message,
-                        text=_strip_group_author_prefix(body),
+                        text=_strip_group_author_prefix(message.text or "") or None,
                         attributes={"is_group": "true"},
                     )
                 )
