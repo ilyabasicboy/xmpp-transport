@@ -25,7 +25,10 @@ class TelegramAvatarCache:
         self.base_url = base_url.rstrip("/")
         self.max_bytes = max_bytes
         self._manifest_path = self.storage_dir / ".references.json"
-        self._lock = asyncio.Lock()
+        # Python 3.9 binds asyncio primitives to the current event loop during
+        # construction. Plugins are discovered synchronously before the
+        # runtime loop exists, so create the lock on first async use instead.
+        self._lock: Optional[asyncio.Lock] = None
 
     async def store(
         self,
@@ -43,7 +46,7 @@ class TelegramAvatarCache:
         content_hash = hashlib.sha256(content).hexdigest()
         filename = f"{content_hash}.jpg"
         self._write_once(self.storage_dir / filename, content)
-        async with self._lock:
+        async with self._get_lock():
             references = self._read_references()
             references[self._reference_key(owner_key, peer_id)] = content_hash
             self._write_references(references)
@@ -73,7 +76,7 @@ class TelegramAvatarCache:
         return path
 
     async def forget(self, owner_key: str, peer_id: int) -> None:
-        async with self._lock:
+        async with self._get_lock():
             references = self._read_references()
             if references.pop(self._reference_key(owner_key, peer_id), None) is not None:
                 self._write_references(references)
@@ -83,7 +86,7 @@ class TelegramAvatarCache:
     ) -> int:
         cutoff = (time.time() if now is None else now) - max(ttl_days, 0) * 86400
         removed = 0
-        async with self._lock:
+        async with self._get_lock():
             referenced = set(self._read_references().values())
             if not self.storage_dir.is_dir():
                 return 0
@@ -100,6 +103,13 @@ class TelegramAvatarCache:
                     continue
                 removed += 1
         return removed
+
+    def _get_lock(self) -> asyncio.Lock:
+        lock = self._lock
+        if lock is None:
+            lock = asyncio.Lock()
+            self._lock = lock
+        return lock
 
     def _read_references(self) -> dict[str, str]:
         try:

@@ -17,6 +17,16 @@ class Client:
         return self.content
 
 
+class TelegramAvatarCacheConstructionTests(unittest.TestCase):
+    def test_constructs_without_an_event_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cache = TelegramAvatarCache(
+                directory, "https://transport.example", 1024
+            )
+
+            self.assertIsNone(cache._lock)
+
+
 class TelegramAvatarCacheTests(unittest.IsolatedAsyncioTestCase):
     async def test_stores_content_addressed_avatar_with_exact_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
