@@ -341,6 +341,15 @@ def compose_single_backend(
             "component_connect_timeout",
         ),
     )
+    http_host = backend.options.get("http_host", config.http.host).strip()
+    if not http_host:
+        raise ValueError("http_host must not be empty")
+    http_port = _positive_int(
+        backend.options.get("http_port", str(config.http.port)),
+        "http_port",
+    )
+    if http_port > 65535:
+        raise ValueError("http_port must be at most 65535")
     health = HealthState()
     return SingleBackendRuntime(
         config=config,
@@ -350,8 +359,8 @@ def compose_single_backend(
         health=health,
         health_server=AiohttpHealthServer(
             health,
-            config.http.host,
-            config.http.port,
+            http_host,
+            http_port,
             media_handler=getattr(plugin, "media_handler", None),
             avatar_handler=getattr(plugin, "avatar_handler", None),
         ),
