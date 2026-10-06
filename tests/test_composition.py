@@ -68,11 +68,14 @@ class CompositionTests(unittest.TestCase):
                 BackendConfig(
                     "fake",
                     "fake.example.com",
-                    {"component_secret_env": "FAKE_COMPONENT_SECRET"},
+                    {
+                        "component_secret_env": "FAKE_COMPONENT_SECRET",
+                    },
                 ),
             ),
             database=DatabaseConfig("postgresql://user:private@db/transport"),
             credential_key_env="CREDENTIAL_KEY",
+            iq_auth_secret="shared-roster-iq-secret-at-least-32-bytes",
         )
         runtime = compose_single_backend(
             config,
@@ -116,6 +119,7 @@ class CompositionTests(unittest.TestCase):
             database=DatabaseConfig("postgresql://user:private@db/transport"),
             http=HttpConfig("127.0.0.1", 8080),
             credential_key_env="CREDENTIAL_KEY",
+            iq_auth_secret="shared-roster-iq-secret-at-least-32-bytes",
         )
 
         runtime = compose_single_backend(
@@ -145,9 +149,34 @@ class CompositionTests(unittest.TestCase):
             ),
             database=DatabaseConfig("postgresql://user:private@db/transport"),
             credential_key_env="CREDENTIAL_KEY",
+            iq_auth_secret="shared-roster-iq-secret-at-least-32-bytes",
         )
 
         with self.assertRaisesRegex(ValueError, "http_port"):
+            compose_single_backend(
+                config,
+                FakePlugin(),  # type: ignore[arg-type]
+                {
+                    "FAKE_COMPONENT_SECRET": "component-secret",
+                    "CREDENTIAL_KEY": key,
+                },
+            )
+
+    def test_requires_iq_auth_secret(self) -> None:
+        key = Fernet.generate_key().decode("ascii")
+        config = RuntimeConfig(
+            backends=(
+                BackendConfig(
+                    "fake",
+                    "fake.example.com",
+                    {"component_secret_env": "FAKE_COMPONENT_SECRET"},
+                ),
+            ),
+            database=DatabaseConfig("postgresql://user:private@db/transport"),
+            credential_key_env="CREDENTIAL_KEY",
+        )
+
+        with self.assertRaisesRegex(ValueError, "iq_auth_secret"):
             compose_single_backend(
                 config,
                 FakePlugin(),  # type: ignore[arg-type]

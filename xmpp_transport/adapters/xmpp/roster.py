@@ -1,6 +1,9 @@
 """Roster mutations through the privileged Xabber Server helper module."""
 
+import hashlib
+import hmac
 from typing import Protocol, Sequence
+from uuid import uuid4
 from xml.etree import ElementTree as ET
 
 from xmpp_transport.domain.identifiers import BindingId
@@ -29,7 +32,10 @@ class XmppServerRoster:
         server_domain: str,
         namespace: str,
         groups: Sequence[str],
+        iq_auth_secret: str,
     ) -> None:
+        if len(iq_auth_secret.encode("utf-8")) < 32:
+            raise ValueError("iq_auth_secret must contain at least 32 bytes")
         self._wire = wire
         self._bindings = bindings
         self._addresses = addresses
@@ -37,6 +43,7 @@ class XmppServerRoster:
         self._server_domain = server_domain
         self._namespace = namespace
         self._groups = tuple(groups)
+        self._iq_auth_secret = iq_auth_secret.encode("utf-8")
 
     async def add_contact(self, binding_id: BindingId, contact: Contact) -> None:
         await self._mutate("add-roster-contact", binding_id, contact)
@@ -53,16 +60,25 @@ class XmppServerRoster:
         owner_jid = await self._bindings.xmpp_account_for_binding(binding_id)
         if owner_jid is None:
             raise LookupError("active XMPP account not found for roster synchronization")
+        iq_id = uuid4().hex
+        signature = hmac.new(
+            self._iq_auth_secret,
+            iq_id.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
         iq = ET.Element(
             "iq",
             {
+                "id": iq_id,
                 "type": "set",
                 "from": self._component_domain,
                 "to": self._server_domain,
             },
         )
         query = ET.SubElement(
-            iq, "{{{}}}query".format(self._namespace), {"op": operation}
+            iq,
+            "{{{}}}query".format(self._namespace),
+            {"op": operation, "auth-signature": signature},
         )
         fields = {
             "owner_jid": owner_jid,

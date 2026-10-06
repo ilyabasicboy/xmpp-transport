@@ -57,16 +57,22 @@ class ConfigTests(unittest.TestCase):
                 "[backend:max]\ncomponent_domain=max.example.com\n"
                 "component_secret=private-component-secret\n"
                 "[database]\ndsn=postgresql://user:private@db/transport\n"
-                "[security]\ncredential_key=private-fernet-key\n",
+                "[security]\ncredential_key=private-fernet-key\n"
+                "iq_auth_secret=private-shared-iq-secret-at-least-32-bytes\n",
                 encoding="utf-8",
             )
             config = load_config(path)
 
         self.assertEqual("private-component-secret", config.backends[0].component_secret)
         self.assertEqual(b"private-fernet-key", config.credential_key({}))
+        self.assertEqual(
+            "private-shared-iq-secret-at-least-32-bytes",
+            config.iq_auth_secret,
+        )
         representation = repr(config)
         self.assertNotIn("private-component-secret", representation)
         self.assertNotIn("private-fernet-key", representation)
+        self.assertNotIn("private-shared-iq-secret", representation)
         self.assertNotIn("postgresql://user:private", representation)
 
     def test_credential_key_is_loaded_from_named_environment_variable(self) -> None:

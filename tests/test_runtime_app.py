@@ -33,12 +33,18 @@ class CliConfigurationTests(unittest.TestCase):
             path.write_text(
                 "[backend:telegram]\ncomponent_domain=telegram.example.com\n"
                 "[backend:max]\ncomponent_domain=max.example.com\n"
-                "[database]\ndsn=postgresql://db/transport\n",
+                "[database]\ndsn=postgresql://db/transport\n"
+                "[security]\n"
+                "iq_auth_secret=shared-roster-iq-secret-at-least-32-bytes\n",
                 encoding="utf-8",
             )
             args = parse_args(["--config", str(path), "--backend", "max"])
             config = selected_config(args, {})
         self.assertEqual(["max"], [item.name for item in config.backends])
+        self.assertEqual(
+            "shared-roster-iq-secret-at-least-32-bytes",
+            config.iq_auth_secret,
+        )
 
     def test_uses_configuration_path_from_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

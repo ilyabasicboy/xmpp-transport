@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
 from xmpp_transport.adapters.xmpp.addressing import ContactAddressCodec
@@ -41,6 +42,7 @@ class XmppServerRosterTests(unittest.IsolatedAsyncioTestCase):
             "example.com",
             NAMESPACE,
             ("MAX",),
+            "shared-roster-iq-secret-at-least-32-bytes",
         )
         self.contact = Contact(RemoteObjectId("42"), "Alice")
 
@@ -57,13 +59,45 @@ class XmppServerRosterTests(unittest.IsolatedAsyncioTestCase):
             if child.tag.rsplit("}", 1)[-1] == "field"
         }
         self.assertEqual("set", iq.attrib["type"])
+        self.assertTrue(iq.attrib["id"])
         self.assertEqual("max.example.com", iq.attrib["from"])
         self.assertEqual("example.com", iq.attrib["to"])
         self.assertEqual("add-roster-contact", query.attrib["op"])
+        self.assertEqual(64, len(query.attrib["auth-signature"]))
         self.assertEqual("user@example.com", fields["owner_jid"])
         self.assertEqual("chat-42@max.example.com", fields["contact_jid"])
         self.assertEqual("Alice", fields["name"])
         self.assertEqual("MAX", query.findtext("group"))
+
+    async def test_signature_is_hmac_of_iq_id(self) -> None:
+        fixed_id = "0123456789abcdef0123456789abcdef"
+        with patch(
+            "xmpp_transport.adapters.xmpp.roster.uuid4",
+            return_value=type("Uuid", (), {"hex": fixed_id})(),
+        ):
+            await self.roster.add_contact(BindingId("binding-1"), self.contact)
+
+        iq = self.wire.requests[0]
+        query = iq.find("{{{}}}query".format(NAMESPACE))
+        assert query is not None
+        self.assertEqual(fixed_id, iq.attrib["id"])
+        self.assertEqual(
+            "fa2efc28f604d5f2e3eaf1697e473b224454bd51b49eb0df022630a4ce7b5020",
+            query.attrib["auth-signature"],
+        )
+
+    def test_rejects_short_iq_auth_secret(self) -> None:
+        with self.assertRaisesRegex(ValueError, "iq_auth_secret"):
+            XmppServerRoster(
+                self.wire,
+                Bindings(),  # type: ignore[arg-type]
+                ContactAddressCodec("telegram.example.com"),
+                "telegram.example.com",
+                "example.com",
+                NAMESPACE,
+                ("Telegram",),
+                "short",
+            )
 
     async def test_remove_contact_omits_group(self) -> None:
         await self.roster.remove_contact(BindingId("binding-1"), self.contact)

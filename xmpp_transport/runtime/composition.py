@@ -162,6 +162,7 @@ class SingleBackendRuntime:
         roster_namespace = self._backend.options.get(
             "roster_namespace", "urn:xabber:transport:roster:1"
         )
+        iq_auth_secret = self._config.iq_auth_secret
         delivery = XmppMessageDelivery(
             self._wire,
             addresses,
@@ -198,6 +199,7 @@ class SingleBackendRuntime:
                     else self._backend.name.upper(),
                 ),
             ),
+            iq_auth_secret,
         )
         roster_sync = RosterSync(AsyncpgRosterSyncRepository(pool), roster)
         dispatcher.register(ContactChanged, roster_sync.handle)
@@ -316,6 +318,9 @@ def compose_single_backend(
     if config.database is None:
         raise ValueError("single-backend runtime requires [database] configuration")
     backend = config.backends[0]
+    iq_auth_secret = config.iq_auth_secret
+    if len(iq_auth_secret.encode("utf-8")) < 32:
+        raise ValueError("iq_auth_secret must contain at least 32 bytes")
     configure_plugin = getattr(plugin, "configure", None)
     if configure_plugin is not None:
         configure_plugin(backend.options)
