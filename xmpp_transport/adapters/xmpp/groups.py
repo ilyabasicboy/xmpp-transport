@@ -79,9 +79,17 @@ class XmppGroupManager:
         except Exception as exc:
             if not self._is_conflict(exc):
                 raise
-        update = ET.Element("{{{}}}info".format(GROUPS_NS))
-        ET.SubElement(update, "name").text = conversation.title
-        await self._request(group_jid, update)
+        # The group creator is already a member.  The original transports do
+        # not update info or invite the component after create/conflict: both
+        # requests can be rejected when an existing group is restored.
+        await self._ensure_member(
+            owner_jid,
+            group_jid,
+            owner_jid,
+            owner_jid.split("@", 1)[0],
+            auto_join=False,
+            send_invite=True,
+        )
         if conversation.avatar is not None:
             try:
                 await self._update_avatar(group_jid, conversation)
@@ -93,21 +101,6 @@ class XmppGroupManager:
                     group_jid,
                     exc_info=True,
                 )
-        await self._ensure_member(
-            owner_jid,
-            group_jid,
-            self._control_jid,
-            "{} Transport".format(self._provider_label),
-            auto_join=True,
-        )
-        await self._ensure_member(
-            owner_jid,
-            group_jid,
-            owner_jid,
-            owner_jid.split("@", 1)[0],
-            auto_join=False,
-            send_invite=True,
-        )
         owner_remote_id = conversation.attributes.get("owner_remote_id")
         for participant in conversation.participants:
             if owner_remote_id and str(participant.id) == owner_remote_id:

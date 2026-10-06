@@ -54,8 +54,8 @@ class XmppGroupManagerTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertEqual(5, len(wire.requests))
-        create_iq, update_iq, transport_invite, owner_invite, member_invite = wire.requests
+        self.assertEqual(3, len(wire.requests))
+        create_iq, owner_invite, member_invite = wire.requests
         localpart = "maxg-75736572406578616d706c652e636f6d--888"
         self.assertEqual("bot@max.example.com", create_iq.attrib["from"])
         self.assertEqual("example.com", create_iq.attrib["to"])
@@ -66,18 +66,7 @@ class XmppGroupManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("MAX Group", create.find("group/info/name").text)
         self.assertEqual("public", create.find("group").attrib["privacy"])
         self.assertEqual("private", create.find("group/settings/membership").text)
-        self.assertEqual("bot@max.example.com", update_iq.attrib["from"])
-        self.assertEqual("{}@example.com".format(localpart), update_iq.attrib["to"])
-        self.assertEqual(
-            "MAX Group",
-            update_iq.find("{{{}}}info/name".format(GROUPS_NS)).text,
-        )
         invite_tag = "{{{}}}invite".format(GROUPS_NS)
-        self.assertEqual(
-            "bot@max.example.com",
-            transport_invite.find(invite_tag + "/jid").text,
-        )
-        self.assertEqual("false", transport_invite.find(invite_tag + "/send").text)
         self.assertEqual(
             "user@example.com", owner_invite.find(invite_tag + "/jid").text
         )
@@ -86,13 +75,12 @@ class XmppGroupManagerTests(unittest.IsolatedAsyncioTestCase):
             "chat-99@max.example.com",
             member_invite.find(invite_tag + "/jid").text,
         )
-        self.assertEqual(4, len(wire.sent))
+        self.assertEqual(2, len(wire.sent))
         self.assertEqual(
-            ["subscribe", "subscribed", "subscribe", "subscribed"],
+            ["subscribe", "subscribed"],
             [presence.attrib["type"] for presence in wire.sent],
         )
-        self.assertEqual("bot@max.example.com", wire.sent[0].attrib["from"])
-        self.assertEqual("chat-99@max.example.com", wire.sent[2].attrib["from"])
+        self.assertEqual("chat-99@max.example.com", wire.sent[0].attrib["from"])
 
         await manager.ensure_group(
             BindingId("binding-1"),
@@ -104,8 +92,8 @@ class XmppGroupManagerTests(unittest.IsolatedAsyncioTestCase):
                 attributes={"owner_remote_id": "100"},
             ),
         )
-        self.assertEqual(5, len(wire.requests))
-        self.assertEqual(4, len(wire.sent))
+        self.assertEqual(3, len(wire.requests))
+        self.assertEqual(2, len(wire.sent))
 
 
     async def test_updates_group_avatar_with_external_metadata(self) -> None:
