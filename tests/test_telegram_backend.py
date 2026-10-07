@@ -303,6 +303,22 @@ class TelegramBackendSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, len(changes))
         self.assertTrue(all(not event.force for event in changes))
 
+    async def test_registers_media_session_before_contact_sync(self) -> None:
+        registration_visible_during_sync = []
+        original_contacts = self.session._synchronize_contacts
+
+        async def inspect_registration():  # type: ignore[no-untyped-def]
+            registration_visible_during_sync.append(
+                BindingId("binding-1") in self.plugin._active_sessions
+            )
+            await original_contacts()
+
+        self.session._synchronize_contacts = inspect_registration  # type: ignore[method-assign]
+
+        await self.session.start()
+
+        self.assertEqual([True], registration_visible_during_sync)
+
     async def test_publishes_incoming_private_text(self) -> None:
         await self.session.start()
         event = type(

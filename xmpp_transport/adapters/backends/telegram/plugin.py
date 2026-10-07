@@ -263,8 +263,12 @@ class TelegramBackendSession:
             self._owner_id = int(owner.id)
             self._install_message_handler()
             self._started = True
-            await self._synchronize_contacts()
+            # Incoming events may arrive as soon as the handler is installed. Register
+            # the session with the stateless media proxy before the potentially slow
+            # contact/avatar synchronization so media from those events is immediately
+            # downloadable.
             await self._session_started(self._binding_id, self._session_data)
+            await self._synchronize_contacts()
         except Exception as exc:
             await self._publish_state(SessionState.FAILED, type(exc).__name__)
             raise BackendUnavailable("Telegram session failed to start") from exc
@@ -1187,6 +1191,13 @@ class TelegramBackendPlugin:
             raise web.HTTPNotFound()
         session_data = self._active_sessions.get(binding_id)
         if session_data is None:
+            log.warning(
+                "Telegram media request has no active session binding_id=%s "
+                "peer_id=%s message_id=%s",
+                binding_id,
+                peer_id,
+                message_id,
+            )
             raise web.HTTPNotFound()
         semaphore = self._media_stream_semaphores.setdefault(
             binding_id, asyncio.Semaphore(1)
@@ -1199,6 +1210,13 @@ class TelegramBackendPlugin:
                 client.connect(), timeout=MEDIA_PROXY_CONNECT_TIMEOUT_SECONDS
             )
             if not await client.is_user_authorized():
+                log.warning(
+                    "Telegram media session is not authorized binding_id=%s "
+                    "peer_id=%s message_id=%s",
+                    binding_id,
+                    peer_id,
+                    message_id,
+                )
                 raise web.HTTPNotFound()
             entity = await asyncio.wait_for(
                 _resolve_telegram_entity(client, peer_id),
@@ -1210,6 +1228,13 @@ class TelegramBackendPlugin:
             )
             media = getattr(message, "media", None) if message is not None else None
             if media is None:
+                log.warning(
+                    "Telegram media message is unavailable binding_id=%s "
+                    "peer_id=%s message_id=%s",
+                    binding_id,
+                    peer_id,
+                    message_id,
+                )
                 raise web.HTTPNotFound()
             safe_name = file_name.replace("\\", "_").replace('"', "_")
             safe_name = safe_name.replace("\r", "_").replace("\n", "_")
@@ -1237,7 +1262,15 @@ class TelegramBackendPlugin:
                     await response.write(bytes(chunk))
             await response.write_eof()
             return response
-        except BackendUnavailable:
+        except BackendUnavailable as exc:
+            log.warning(
+                "Telegram media peer is unavailable binding_id=%s peer_id=%s "
+                "message_id=%s reason=%s",
+                binding_id,
+                peer_id,
+                message_id,
+                exc,
+            )
             raise web.HTTPNotFound()
         except ConnectionResetError:
             return response if response is not None else web.Response(status=204)
