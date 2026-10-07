@@ -93,14 +93,26 @@ class XmppGroupManager:
         if conversation.avatar is not None:
             try:
                 await self._update_avatar(group_jid, conversation)
-            except Exception:
-                log.warning(
-                    "XEP-GROUPS avatar update failed; continuing group sync "
-                    "binding_id=%s group_jid=%s",
-                    binding_id,
-                    group_jid,
-                    exc_info=True,
-                )
+            except Exception as exc:
+                rejection = self._iq_rejection(exc)
+                if rejection is not None:
+                    code, condition = rejection
+                    log.warning(
+                        "XEP-GROUPS avatar update rejected; continuing group sync "
+                        "binding_id=%s group_jid=%s code=%s condition=%s",
+                        binding_id,
+                        group_jid,
+                        code,
+                        condition,
+                    )
+                else:
+                    log.warning(
+                        "XEP-GROUPS avatar update failed; continuing group sync "
+                        "binding_id=%s group_jid=%s",
+                        binding_id,
+                        group_jid,
+                        exc_info=True,
+                    )
         owner_remote_id = conversation.attributes.get("owner_remote_id")
         for participant in conversation.participants:
             if owner_remote_id and str(participant.id) == owner_remote_id:
@@ -226,3 +238,24 @@ class XmppGroupManager:
         return xml is not None and xml.find(
             ".//{{{}}}conflict".format(STANZAS_NS)
         ) is not None
+
+    @staticmethod
+    def _iq_rejection(exc: Exception):  # type: ignore[no-untyped-def]
+        iq = getattr(exc, "iq", None)
+        xml = getattr(iq, "xml", None)
+        if xml is None:
+            return None
+        error = xml.find("error")
+        if error is None:
+            error = xml.find("{jabber:client}error")
+        if error is None:
+            return None
+        code = error.attrib.get("code") or "unknown"
+        conditions = tuple(
+            child.tag.rsplit("}", 1)[-1]
+            for child in error
+            if child.tag.startswith("{{{}}}".format(STANZAS_NS))
+            and child.tag.rsplit("}", 1)[-1] != "text"
+        )
+        condition = conditions[0] if conditions else "unknown"
+        return code, condition

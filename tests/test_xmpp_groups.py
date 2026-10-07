@@ -30,6 +30,25 @@ class FakeWire:
         self.sent.append(element)
 
 
+class AvatarRejectingWire(FakeWire):
+    async def request(self, element: ET.Element, timeout: float = 10.0) -> ET.Element:
+        self.requests.append(element)
+        if element.find(".//{urn:xmpp:avatar:metadata}info") is not None:
+            response = ET.fromstring(
+                """
+                <iq xmlns='jabber:client' type='error'>
+                  <error code='500' type='wait'>
+                    <internal-server-error xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>
+                  </error>
+                </iq>
+                """
+            )
+            error = RuntimeError("avatar rejected")
+            error.iq = type("Iq", (), {"xml": response})()  # type: ignore[attr-defined]
+            raise error
+        return ET.Element("iq", {"type": "result"})
+
+
 class XmppGroupManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_creates_and_updates_transport_owned_group(self) -> None:
         wire = FakeWire()
@@ -129,6 +148,41 @@ class XmppGroupManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("avatar-id", info.attrib["id"])
         self.assertEqual("image/jpeg", info.attrib["type"])
         self.assertEqual("https://max.example/avatar.jpg", info.attrib["url"])
+
+    async def test_handles_group_avatar_iq_rejection_without_traceback(self) -> None:
+        wire = AvatarRejectingWire()
+        manager = XmppGroupManager(
+            wire,  # type: ignore[arg-type]
+            FakeBindings(),  # type: ignore[arg-type]
+            "telegram.example.com",
+            "example.com",
+            "bot",
+            "telegramg",
+            "TELEGRAM",
+        )
+
+        with self.assertLogs(
+            "xmpp_transport.adapters.xmpp.groups", level="WARNING"
+        ) as captured:
+            await manager.ensure_group(
+                BindingId("binding-1"),
+                Conversation(
+                    RemoteObjectId("-888"),
+                    ConversationKind.GROUP,
+                    "Telegram Group",
+                    avatar=Avatar(
+                        "http://127.0.0.1:8088/avatar/avatar.jpg",
+                        "avatar-id",
+                        "image/jpeg",
+                        4570,
+                    ),
+                ),
+            )
+
+        self.assertEqual(1, len(captured.records))
+        self.assertIsNone(captured.records[0].exc_info)
+        self.assertIn("code=500", captured.output[0])
+        self.assertIn("condition=internal-server-error", captured.output[0])
 
 if __name__ == "__main__":
     unittest.main()
