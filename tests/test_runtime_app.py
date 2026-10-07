@@ -7,6 +7,8 @@ from xmpp_transport.domain.identifiers import BackendId
 from xmpp_transport.runtime.app import (
     discover_backend_plugins,
     parse_args,
+    parse_umask,
+    pid_file_from_args,
     plugins_from_entry_points,
     select_plugin,
     selected_config,
@@ -27,6 +29,40 @@ class FakeEntryPoint:
 
 
 class CliConfigurationTests(unittest.TestCase):
+    def test_parses_daemon_lifecycle_options(self) -> None:
+        args = parse_args(
+            [
+                "--backend",
+                "telegram",
+                "--daemon",
+                "--pid-file",
+                "/run/xabber-transport/telegram.pid",
+                "--daemon-workdir",
+                "/opt/xmpp-transport",
+            ]
+        )
+        self.assertTrue(args.daemon)
+        self.assertEqual("/run/xabber-transport/telegram.pid", args.pid_file)
+        self.assertEqual("/opt/xmpp-transport", args.daemon_workdir)
+
+    def test_daemon_actions_are_mutually_exclusive(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(["--daemon", "--stop"])
+
+    def test_backend_specific_default_pid_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "transports.ini"
+            path.write_text(
+                "[backend:max]\ncomponent_domain=max.example.com\n",
+                encoding="utf-8",
+            )
+            args = parse_args(["--config", str(path), "--backend", "max"])
+            config = selected_config(args, {})
+        self.assertTrue(pid_file_from_args(args, config).endswith("xabber_transport_max.pid"))
+
+    def test_parses_octal_daemon_umask(self) -> None:
+        self.assertEqual(0o027, parse_umask("027"))
+
     def test_selects_backend_from_multi_backend_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "transports.ini"

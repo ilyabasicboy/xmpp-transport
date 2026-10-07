@@ -36,6 +36,34 @@ entry-point group. Validate an installed backend without opening connections:
 xabber-transport --config transports.ini --backend telegram --check-config
 ```
 
+## Daemon and systemd
+
+The daemon lifecycle follows `xmpp-transport-max`. Each backend has its own PID
+file and runs as an isolated process:
+
+```bash
+xabber-transport --config transports.ini --backend max --daemon
+xabber-transport --config transports.ini --backend max --status
+xabber-transport --config transports.ini --backend max --stop
+```
+
+Without `--pid-file`, PID files are stored as
+`run/xabber_transport_<backend>.pid`. Override the location when integrating
+with a service manager.
+
+The systemd template can run MAX and Telegram simultaneously. Review `User`,
+`Group`, `WorkingDirectory`, `ExecStart`, and `ReadWritePaths` before installing
+it. Keep production secrets outside the source checkout:
+
+```bash
+sudo install -d -m 0750 -o root -g xabber-transport /etc/xabber-transport
+sudo install -m 0640 -o root -g xabber-transport transports.ini /etc/xabber-transport/transports.ini
+sudo cp deploy/systemd/xabber-transport@.service.example /etc/systemd/system/xabber-transport@.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now xabber-transport@max xabber-transport@telegram
+sudo systemctl status xabber-transport@max xabber-transport@telegram
+```
+
 ## Local smoke backend
 
 The built-in `fake` backend echoes an outbound direct message back through the

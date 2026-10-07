@@ -6,22 +6,27 @@ import inspect
 import os
 import signal
 import sys
+from collections.abc import Iterable, Mapping, Sequence
 from importlib import metadata
 from pathlib import Path
-from typing import Iterable, Mapping, Optional, Sequence
+from typing import Optional
 
 from xmpp_transport.domain.identifiers import BackendId
 from xmpp_transport.ports.backend import BackendPlugin
 
 from .composition import SingleBackendRuntime, compose_single_backend
 from .config import RuntimeConfig, load_config
-
+from .daemon import DaemonError, daemon_status, daemonize, remove_pid_file, stop_daemon
 
 BACKEND_ENTRY_POINT_GROUP = "xabber_transport.backends"
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="xabber-transport")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--daemon", action="store_true", help="run in the background")
+    action.add_argument("--stop", action="store_true", help="stop a daemonized transport")
+    action.add_argument("--status", action="store_true", help="show daemon process status")
     parser.add_argument(
         "--config",
         type=Path,
@@ -29,11 +34,37 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--backend", help="select one backend section")
     parser.add_argument(
+        "--pid-file",
+        help="PID file path for daemon, stop, and status commands",
+    )
+    parser.add_argument(
+        "--daemon-workdir",
+        help="working directory after daemonization; defaults to the current directory",
+    )
+    parser.add_argument(
+        "--daemon-umask",
+        default="027",
+        help="octal umask used after daemonization; defaults to 027",
+    )
+    parser.add_argument(
         "--check-config",
         action="store_true",
         help="validate config and plugin wiring without opening connections",
     )
     return parser.parse_args(argv)
+
+
+def pid_file_from_args(args: argparse.Namespace, config: RuntimeConfig) -> str:
+    backend_name = config.backends[0].name
+    value = args.pid_file or f"run/xabber_transport_{backend_name}.pid"
+    return os.path.abspath(value)
+
+
+def parse_umask(value: str) -> int:
+    try:
+        return int(value, 8)
+    except ValueError as exc:
+        raise DaemonError(f"Invalid daemon umask {value!r}") from exc
 
 
 def selected_config(
@@ -46,7 +77,7 @@ def selected_config(
     if args.backend:
         matches = tuple(item for item in config.backends if item.name == args.backend)
         if not matches:
-            raise ValueError("backend section not found in configuration: {}".format(args.backend))
+            raise ValueError(f"backend section not found in configuration: {args.backend}")
         return RuntimeConfig(
             backends=matches,
             database=config.database,
@@ -85,7 +116,7 @@ def plugins_from_entry_points(entries: Iterable[object]) -> Sequence[BackendPlug
         if not isinstance(backend_id, BackendId):
             raise TypeError("backend entry point must expose a BackendPlugin instance")
         if backend_id in seen:
-            raise ValueError("duplicate backend plugin: {}".format(backend_id))
+            raise ValueError(f"duplicate backend plugin: {backend_id}")
         seen.add(backend_id)
         plugins.append(plugin)
     return tuple(plugins)
@@ -99,9 +130,8 @@ def select_plugin(
         if plugin.backend_id == backend_id:
             return plugin
     raise LookupError(
-        "backend plugin is not installed: {} (entry point group: {})".format(
-            backend_name, BACKEND_ENTRY_POINT_GROUP
-        )
+        f"backend plugin is not installed: {backend_name} "
+        f"(entry point group: {BACKEND_ENTRY_POINT_GROUP})"
     )
 
 
@@ -131,23 +161,53 @@ async def serve_runtime(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    daemon_started = False
+    pid_file = None
     try:
         config = selected_config(args)
+        pid_file = pid_file_from_args(args, config)
+        if args.status:
+            running, pid = daemon_status(pid_file)
+            if running:
+                print(f"transport {config.backends[0].name} running as pid {pid}")
+                return 0
+            if pid is None:
+                print(f"transport {config.backends[0].name} not running")
+            else:
+                print(
+                    f"transport {config.backends[0].name} not running; "
+                    f"stale pid file contains pid {pid}"
+                )
+            return 1
+        if args.stop:
+            stop_daemon(pid_file)
+            print(f"transport {config.backends[0].name} stopped")
+            return 0
         plugins = discover_backend_plugins()
         backend = config.backends[0]
         plugin = select_plugin(plugins, backend.name)
         environment = config.resolved_environment()
         runtime = compose_single_backend(config, plugin, environment)
         if args.check_config:
-            print("configuration valid for backend: {}".format(backend.name))
+            print(f"configuration valid for backend: {backend.name}")
             return 0
+        if args.daemon:
+            daemonize(
+                pid_file=pid_file,
+                working_directory=args.daemon_workdir,
+                umask=parse_umask(args.daemon_umask),
+            )
+            daemon_started = True
         asyncio.run(serve_runtime(runtime))
         return 0
     except KeyboardInterrupt:
         return 130
-    except (LookupError, TypeError, ValueError, ModuleNotFoundError) as exc:
-        print("configuration error: {}".format(exc), file=sys.stderr)
+    except (DaemonError, LookupError, TypeError, ValueError, ModuleNotFoundError) as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if daemon_started and pid_file is not None:
+            remove_pid_file(pid_file, os.getpid())
 
 
 if __name__ == "__main__":
