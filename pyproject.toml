@@ -25,6 +25,7 @@ dev = [
 
 [project.scripts]
 xabber-transport = "xmpp_transport.runtime.app:main"
+xabber-transport-create-config = "xmpp_transport.runtime.create_config:main"
 
 [tool.setuptools.packages.find]
 include = ["xmpp_transport*"]

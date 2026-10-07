@@ -14,6 +14,21 @@ python3 -m unittest discover -s tests
 python3 -m xmpp_transport.runtime.app --help
 ```
 
+Create a complete MAX and Telegram configuration with newly generated secrets:
+
+```bash
+xabber-transport-create-config \
+  --telegram-api-id 123456 \
+  --telegram-api-hash replace-with-telegram-api-hash
+```
+
+Both Telegram API arguments are optional. When omitted, the command leaves
+`api_id` and `api_hash` empty for manual configuration later.
+
+The command creates `transports.ini` with mode `0600`. It refuses to overwrite
+an existing file unless `--force` is passed. Use `--database-dsn`,
+`--server-domain`, `--component-host`, or `--output` to override defaults.
+
 Backend adapters are discovered from the `xabber_transport.backends` Python
 entry-point group. Validate an installed backend without opening connections:
 
